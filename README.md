@@ -25,3 +25,7 @@ An AI-powered Research Assistant that uses Retrieval Augmented Generation (RAG) 
 ## Project Status
 
 Currently building the document ingestion pipeline.
+
+## Live Demo
+
+[Try the AI RAG Research Assistant](your-streamlit-url)
