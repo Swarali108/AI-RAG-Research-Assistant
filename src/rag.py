@@ -44,17 +44,22 @@ class RAGPipeline:
         history_text = self.format_chat_history(chat_history[-6:])
 
         prompt = f"""
-Rewrite the latest user question as a standalone question.
+Rewrite the latest user question as a standalone retrieval question.
 
-Use the conversation history to resolve references like it, this, that, they, he, she.
+Important:
+- Preserve the user's intent.
+- Resolve references like it, this, that, they.
+- Do not convert follow-up questions into generic definitions.
+- If the user asks "where do we use it?", preserve that as a usage question.
+- If the user asks "examples?", preserve that as an examples question.
 
 Conversation history:
 {history_text}
 
-Latest question:
+Latest user question:
 {question}
 
-Standalone question:
+Standalone retrieval question:
 """
 
         try:
@@ -108,14 +113,21 @@ Snippet:
         return f"""
 You are an AI Research Assistant.
 
-Answer the user using:
+Your job is to answer the LATEST user question directly.
+
+Use:
 1. Uploaded document context first.
 2. External web context only when provided.
-3. Conversation history only to understand references.
+3. Conversation history only to understand references and avoid repetition.
 
 Rules:
+- Answer the latest user question, not the earlier question.
+- Do not repeat the same definition if it was already answered.
+- If the latest question asks "how", explain practical steps.
+- If the latest question asks "where", explain use cases or situations.
+- If the latest question asks for "examples", give concrete examples.
 - Prefer uploaded document evidence over web results.
-- If the answer is not supported by the uploaded document or web context, say you do not know.
+- If the answer is not supported by uploaded document or web context, say you do not know.
 - Cite uploaded documents as [File name, Page X].
 - Cite web results as [Web Source X].
 - Do not invent facts.
@@ -129,7 +141,7 @@ Uploaded Document Context:
 External Web Context:
 {web_context}
 
-Original User Question:
+Original Latest User Question:
 {question}
 
 Standalone Retrieval Question:
@@ -191,7 +203,7 @@ Answer:
             )
 
             if "RESOURCE_EXHAUSTED" in error_text or "429" in error_text:
-                 answer = "Gemini quota or rate limit reached. Wait a bit or use another Gemini API key."
+                answer = "Gemini quota or rate limit reached. Wait a bit or use another Gemini API key."
 
             elif "API_KEY_INVALID" in error_text or "403" in error_text:
                 answer = "Gemini API key issue. Check Streamlit Secrets and use a fresh unrestricted Gemini API key."
@@ -208,7 +220,7 @@ Answer:
                 "citations": citations,
                 "retrieved_chunks": retrieved_chunks,
                 "external_results": external_results,
-                "error": str(error),
+                "error": error_text,
             }
 
         return {
