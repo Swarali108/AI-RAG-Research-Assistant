@@ -6,4 +6,4 @@ numpy
 pandas
 python-dotenv
 google-genai
-duckduckgo-search
+ddgs
