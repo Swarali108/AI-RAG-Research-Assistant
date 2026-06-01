@@ -14,6 +14,7 @@ class RAGPipeline:
         self.model_name = model_name
 
         api_key = os.getenv("GEMINI_API_KEY")
+
         if not api_key:
             try:
                 import streamlit as st
@@ -22,9 +23,9 @@ class RAGPipeline:
                 api_key = None
 
         if not api_key:
-            raise ValueError("GEMINI_API_KEY not found. Add it to your .env file.")
+            raise ValueError("GEMINI_API_KEY not found. Add it in Streamlit Secrets.")
 
-        self.client = genai.Client(api_key=api_key)
+        self.client = genai.Client(api_key=str(api_key).strip())
 
     def format_chat_history(self, chat_history):
         formatted = ""
@@ -56,13 +57,15 @@ Latest question:
 Standalone question:
 """
 
-        response = self.client.models.generate_content(
-            model=self.model_name,
-            contents=prompt,
-            config=types.GenerateContentConfig(temperature=0.1),
-        )
-
-        return response.text.strip()
+        try:
+            response = self.client.models.generate_content(
+                model=self.model_name,
+                contents=prompt,
+                config=types.GenerateContentConfig(temperature=0.1),
+            )
+            return response.text.strip()
+        except Exception:
+            return question
 
     def build_prompt(
         self,
@@ -98,7 +101,7 @@ Snippet:
 
         history_text = self.format_chat_history(chat_history[-6:]) if chat_history else ""
 
-        prompt = f"""
+        return f"""
 You are an AI Research Assistant.
 
 Answer the user using:
@@ -130,7 +133,6 @@ Standalone Retrieval Question:
 
 Answer:
 """
-        return prompt
 
     def ask(
         self,
@@ -148,20 +150,6 @@ Answer:
         query_embedding = self.embedding_model.embed_query(standalone_question)
         retrieved_chunks = self.vector_store.search(query_embedding, top_k=top_k)
 
-        prompt = self.build_prompt(
-            question=question,
-            standalone_question=standalone_question,
-            retrieved_chunks=retrieved_chunks,
-            chat_history=chat_history,
-            external_results=external_results,
-        )
-
-        response = self.client.models.generate_content(
-            model=self.model_name,
-            contents=prompt,
-            config=types.GenerateContentConfig(temperature=temperature),
-        )
-
         citations = [
             {
                 "source": chunk.get("source", "uploaded_document.pdf"),
@@ -172,8 +160,40 @@ Answer:
             for chunk in retrieved_chunks
         ]
 
+        prompt = self.build_prompt(
+            question=question,
+            standalone_question=standalone_question,
+            retrieved_chunks=retrieved_chunks,
+            chat_history=chat_history,
+            external_results=external_results,
+        )
+
+        try:
+            response = self.client.models.generate_content(
+                model=self.model_name,
+                contents=prompt,
+                config=types.GenerateContentConfig(temperature=temperature),
+            )
+
+            answer = response.text
+
+        except Exception as error:
+            answer = (
+                "Gemini API error. Please check your Streamlit Secrets, Gemini API key, "
+                "quota, billing/project access, or model access in Streamlit Cloud logs."
+            )
+
+            return {
+                "answer": answer,
+                "standalone_question": standalone_question,
+                "citations": citations,
+                "retrieved_chunks": retrieved_chunks,
+                "external_results": external_results,
+                "error": str(error),
+            }
+
         return {
-            "answer": response.text,
+            "answer": answer,
             "standalone_question": standalone_question,
             "citations": citations,
             "retrieved_chunks": retrieved_chunks,
