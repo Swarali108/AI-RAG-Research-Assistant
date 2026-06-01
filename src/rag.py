@@ -8,7 +8,7 @@ load_dotenv()
 
 
 class RAGPipeline:
-    def __init__(self, embedding_model, vector_store, model_name="gemini-2.5-flash"):
+    def __init__(self, embedding_model, vector_store, model_name="gemini-2.5-flash-lite"):
         self.embedding_model = embedding_model
         self.vector_store = vector_store
         self.model_name = model_name
@@ -90,13 +90,17 @@ Content:
         web_context = ""
 
         if external_results:
-            for index, result in enumerate(external_results, start=1):
+            for index, result in enumerate(external_results[:3], start=1):
+                title = str(result.get("title", "Untitled"))[:120]
+                url = str(result.get("url", ""))[:250]
+                snippet = str(result.get("snippet", ""))[:500]
+
                 web_context += f"""
 Web Source {index}
-Title: {result.get("title", "Untitled")}
-URL: {result.get("url", "")}
+Title: {title}
+URL: {url}
 Snippet:
-{result.get("snippet", "")}
+{snippet}
 """
 
         history_text = self.format_chat_history(chat_history[-6:]) if chat_history else ""
@@ -178,10 +182,25 @@ Answer:
             answer = response.text
 
         except Exception as error:
+            error_text = str(error)
+
             answer = (
-                "Gemini API error. Please check your Streamlit Secrets, Gemini API key, "
-                "quota, billing/project access, or model access in Streamlit Cloud logs."
+                "Gemini API error while generating the answer. "
+                "The uploaded-document retrieval worked, but the final Gemini call failed. "
+                "Try turning external web search off, lowering retrieved chunks, or using a fresh Gemini API key."
             )
+
+            if "RESOURCE_EXHAUSTED" in error_text or "429" in error_text:
+                 answer = "Gemini quota or rate limit reached. Wait a bit or use another Gemini API key."
+
+            elif "API_KEY_INVALID" in error_text or "403" in error_text:
+                answer = "Gemini API key issue. Check Streamlit Secrets and use a fresh unrestricted Gemini API key."
+
+            elif "INVALID_ARGUMENT" in error_text or "400" in error_text:
+                answer = (
+                    "Gemini rejected the request. This can happen when external web context is too noisy. "
+                    "Try web search off, fewer retrieved chunks, or ask a shorter question."
+                )
 
             return {
                 "answer": answer,

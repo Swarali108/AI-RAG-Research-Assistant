@@ -1,7 +1,15 @@
-try:
-    from ddgs import DDGS
-except ImportError:
-    from duckduckgo_search import DDGS
+from ddgs import DDGS
+
+
+def clean_text(value, max_chars=500):
+    if not value:
+        return ""
+
+    text = str(value)
+    text = text.replace("\x00", " ")
+    text = " ".join(text.split())
+
+    return text[:max_chars]
 
 
 def search_web(query, max_results=3):
@@ -9,14 +17,17 @@ def search_web(query, max_results=3):
 
     try:
         with DDGS() as ddgs:
-            search_results = ddgs.text(query, max_results=max_results)
+            for item in ddgs.text(query, max_results=max_results):
+                title = clean_text(item.get("title", "Untitled"), max_chars=120)
+                url = clean_text(item.get("href") or item.get("url", ""), max_chars=250)
+                snippet = clean_text(item.get("body") or item.get("snippet", ""), max_chars=500)
 
-            for item in search_results:
-                results.append({
-                    "title": item.get("title", "Untitled"),
-                    "url": item.get("href") or item.get("url", ""),
-                    "snippet": item.get("body") or item.get("snippet", ""),
-                })
+                if title or snippet:
+                    results.append({
+                        "title": title,
+                        "url": url,
+                        "snippet": snippet,
+                    })
 
     except Exception:
         return []
