@@ -7,3 +7,7 @@ pandas
 python-dotenv
 google-genai
 ddgs
+fastapi
+uvicorn
+flask
+pydantic
