@@ -364,7 +364,8 @@ def home():
     * { box-sizing: border-box; }
     body {
       margin: 0;
-      min-height: 100vh;
+      height: 100vh;
+      overflow: hidden;
       font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
       background:
         linear-gradient(145deg, #050713 0%, #071022 46%, #050713 100%);
@@ -374,12 +375,14 @@ def home():
     .app-shell {
       display: grid;
       grid-template-columns: 320px minmax(0, 1fr) 360px;
-      min-height: 100vh;
+      height: 100vh;
+      overflow: hidden;
     }
     .sidebar {
       padding: 22px;
       border-right: 1px solid var(--line);
       background: linear-gradient(180deg, rgba(9, 12, 28, 0.98), rgba(5, 7, 19, 0.98));
+      overflow-y: auto;
     }
     .brand {
       display: flex;
@@ -437,6 +440,10 @@ def home():
     .main {
       padding: 30px 34px;
       min-width: 0;
+      height: 100vh;
+      display: flex;
+      flex-direction: column;
+      overflow: hidden;
     }
     .topbar {
       display: flex;
@@ -465,6 +472,7 @@ def home():
       grid-template-columns: repeat(4, minmax(0, 1fr));
       gap: 14px;
       margin: 24px 0;
+      flex: 0 0 auto;
     }
     .quick-card, .panel, .inspector-panel {
       border: 1px solid var(--line);
@@ -484,6 +492,8 @@ def home():
       border-radius: 8px;
       background: rgba(9, 13, 29, 0.82);
       margin-bottom: 16px;
+      flex: 0 0 auto;
+      width: max-content;
     }
     .tab {
       border: 0;
@@ -498,8 +508,36 @@ def home():
       background: linear-gradient(135deg, rgba(155, 92, 255, 0.8), rgba(240, 106, 191, 0.66));
     }
     .tab-view { display: none; }
-    .tab-view.active { display: block; }
-    .chat-panel { padding: 24px; min-height: 620px; }
+    .tab-view.active {
+      min-height: 0;
+    }
+    #chatTab.tab-view.active {
+      display: flex;
+      flex: 1 1 auto;
+      overflow: hidden;
+    }
+    #inspectorTab.tab-view.active {
+      display: block;
+      flex: 1 1 auto;
+      overflow-y: auto;
+      padding-right: 6px;
+    }
+    .chat-panel {
+      padding: 24px;
+      min-height: 0;
+      flex: 1 1 auto;
+      width: 100%;
+      display: flex;
+      flex-direction: column;
+      overflow: hidden;
+    }
+    #messages {
+      flex: 1 1 auto;
+      min-height: 0;
+      overflow-y: auto;
+      padding-right: 8px;
+      scroll-behavior: smooth;
+    }
     .message-row {
       display: flex;
       gap: 14px;
@@ -546,6 +584,7 @@ def home():
       border-radius: 8px;
       padding: 16px;
       background: rgba(8, 12, 28, 0.84);
+      flex: 0 0 auto;
     }
     textarea {
       width: 100%;
@@ -600,6 +639,7 @@ def home():
       padding: 30px 22px;
       border-left: 1px solid var(--line);
       background: rgba(5, 7, 19, 0.68);
+      overflow-y: auto;
     }
     .doc-card, .side-card {
       border: 1px solid var(--line);
@@ -1068,6 +1108,7 @@ def home():
       }
 
       const nextWord = wordQueue.shift();
+      const shouldStickToBottom = isMessagesNearBottom();
       latestAnswer += nextWord;
 
       if (activeAnswerNode) {
@@ -1075,6 +1116,10 @@ def home():
       }
 
       inspectAnswer.textContent = latestAnswer;
+
+      if (shouldStickToBottom) {
+        scrollMessagesToBottom();
+      }
     }
 
     function stopWordStreamer() {
@@ -1108,15 +1153,23 @@ def home():
         bubble.appendChild(answer);
         row.appendChild(bubble);
         messages.appendChild(row);
-        row.scrollIntoView({ behavior: "smooth", block: "end" });
+        scrollMessagesToBottom();
         return answer;
       }
 
       bubble.textContent = content;
       row.appendChild(bubble);
       messages.appendChild(row);
-      row.scrollIntoView({ behavior: "smooth", block: "end" });
+      scrollMessagesToBottom();
       return bubble;
+    }
+
+    function isMessagesNearBottom() {
+      return messages.scrollHeight - messages.scrollTop - messages.clientHeight < 80;
+    }
+
+    function scrollMessagesToBottom() {
+      messages.scrollTop = messages.scrollHeight;
     }
 
     function renderError(message) {
