@@ -1119,6 +1119,7 @@ def home():
       }
 
       addMessage("user", question);
+      questionInput.value = "";
       updateRecentChats(question);
       const answerNode = addMessage("assistant", "", currentMode);
       latestAnswer = "";
