@@ -876,6 +876,10 @@ def home():
     const inspectAnswer = document.getElementById("inspectAnswer");
     let currentMode = "Research Mode";
     let latestAnswer = "";
+    let wordQueue = [];
+    let streamingTimer = null;
+    let activeAnswerNode = null;
+    let pendingFinalAnswer = null;
 
     document.querySelectorAll(".tab").forEach(button => {
       button.addEventListener("click", () => {
@@ -951,6 +955,10 @@ def home():
       addMessage("user", question);
       const answerNode = addMessage("assistant", "", currentMode);
       latestAnswer = "";
+      wordQueue = [];
+      pendingFinalAnswer = null;
+      activeAnswerNode = answerNode;
+      stopWordStreamer();
       askButton.disabled = true;
       inspectAnswer.textContent = "Streaming answer...";
 
@@ -1017,19 +1025,62 @@ def home():
       }
 
       if (eventName === "chunk") {
-        latestAnswer += payload.text;
-        answerNode.textContent = latestAnswer;
-        inspectAnswer.textContent = latestAnswer;
+        enqueueWords(payload.text, answerNode);
       }
 
       if (eventName === "done") {
-        latestAnswer = payload.answer || latestAnswer;
-        answerNode.textContent = latestAnswer;
-        inspectAnswer.textContent = latestAnswer;
+        pendingFinalAnswer = payload.answer || latestAnswer;
+        if (!wordQueue.length) {
+          latestAnswer = pendingFinalAnswer;
+          answerNode.textContent = latestAnswer;
+          inspectAnswer.textContent = latestAnswer;
+        }
       }
 
       if (eventName === "error") {
         throw new Error(payload.message || "Streaming failed.");
+      }
+    }
+
+    function enqueueWords(text, answerNode) {
+      const pieces = String(text).match(/\\S+\\s*/g) || [String(text)];
+      wordQueue.push(...pieces);
+      activeAnswerNode = answerNode;
+
+      if (!streamingTimer) {
+        streamingTimer = setInterval(flushNextWord, 26);
+      }
+    }
+
+    function flushNextWord() {
+      if (!wordQueue.length) {
+        stopWordStreamer();
+
+        if (pendingFinalAnswer) {
+          latestAnswer = pendingFinalAnswer;
+          if (activeAnswerNode) {
+            activeAnswerNode.textContent = latestAnswer;
+          }
+          inspectAnswer.textContent = latestAnswer;
+        }
+
+        return;
+      }
+
+      const nextWord = wordQueue.shift();
+      latestAnswer += nextWord;
+
+      if (activeAnswerNode) {
+        activeAnswerNode.textContent = latestAnswer;
+      }
+
+      inspectAnswer.textContent = latestAnswer;
+    }
+
+    function stopWordStreamer() {
+      if (streamingTimer) {
+        clearInterval(streamingTimer);
+        streamingTimer = null;
       }
     }
 
