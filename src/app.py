@@ -388,7 +388,7 @@ def home():
       display: flex;
       align-items: center;
       gap: 12px;
-      margin-bottom: 28px;
+      margin-bottom: 18px;
     }
     .spark {
       width: 44px;
@@ -412,7 +412,32 @@ def home():
       cursor: pointer;
       box-shadow: 0 18px 42px rgba(116, 56, 255, 0.25);
     }
-    .nav, .library { margin-top: 24px; }
+    .profile-field {
+      margin-bottom: 16px;
+      padding: 12px;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: rgba(13, 18, 36, 0.72);
+    }
+    .profile-field label {
+      display: block;
+      margin-bottom: 8px;
+      color: var(--muted);
+      font-size: 0.82rem;
+      font-weight: 700;
+      text-transform: uppercase;
+      letter-spacing: 0.04em;
+    }
+    .profile-field input {
+      width: 100%;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      padding: 10px 11px;
+      color: var(--text);
+      background: rgba(5, 7, 19, 0.72);
+      outline: none;
+    }
+    .nav, .library { margin-top: 18px; }
     .nav-item, .library-item, .recent-item {
       display: flex;
       align-items: center;
@@ -431,14 +456,14 @@ def home():
       background: linear-gradient(90deg, rgba(155, 92, 255, 0.24), rgba(71, 234, 216, 0.05));
     }
     .section-label {
-      margin: 24px 0 10px;
+      margin: 18px 0 10px;
       color: var(--muted);
       font-size: 0.78rem;
       letter-spacing: 0.05em;
       text-transform: uppercase;
     }
     .main {
-      padding: 30px 34px;
+      padding: 22px 34px 24px;
       min-width: 0;
       height: 100vh;
       display: flex;
@@ -450,28 +475,29 @@ def home():
       align-items: center;
       justify-content: space-between;
       gap: 16px;
-      margin-bottom: 22px;
+      margin-bottom: 12px;
     }
     h1 {
       margin: 0 0 10px;
-      font-size: clamp(2.1rem, 5vw, 3.2rem);
+      font-size: clamp(1.9rem, 4vw, 2.65rem);
       line-height: 1;
       letter-spacing: 0;
       color: #c896ff;
     }
-    .subtitle { margin: 0; font-size: 1.1rem; color: var(--text); }
+    .subtitle { margin: 0; font-size: 1rem; color: var(--text); }
     .share {
       border: 1px solid var(--line);
       border-radius: 8px;
-      padding: 10px 14px;
+      padding: 9px 13px;
       color: var(--text);
       background: rgba(18, 24, 48, 0.86);
+      cursor: pointer;
     }
     .quick-grid {
       display: grid;
       grid-template-columns: repeat(4, minmax(0, 1fr));
-      gap: 14px;
-      margin: 24px 0;
+      gap: 12px;
+      margin: 14px 0;
       flex: 0 0 auto;
     }
     .quick-card, .panel, .inspector-panel {
@@ -480,9 +506,9 @@ def home():
       background: linear-gradient(180deg, rgba(14, 19, 40, 0.92), rgba(8, 12, 28, 0.92));
       box-shadow: 0 24px 80px rgba(0, 0, 0, 0.22);
     }
-    .quick-card { padding: 16px; min-height: 86px; }
-    .quick-card strong { display: block; margin-bottom: 8px; }
-    .quick-card span { color: var(--muted); font-size: 0.9rem; }
+    .quick-card { padding: 12px 14px; min-height: 64px; }
+    .quick-card strong { display: block; margin-bottom: 5px; font-size: 0.95rem; }
+    .quick-card span { color: var(--muted); font-size: 0.84rem; }
     .tab-bar {
       display: inline-grid;
       grid-template-columns: repeat(2, 1fr);
@@ -491,14 +517,14 @@ def home():
       border: 1px solid var(--line);
       border-radius: 8px;
       background: rgba(9, 13, 29, 0.82);
-      margin-bottom: 16px;
+      margin-bottom: 10px;
       flex: 0 0 auto;
       width: max-content;
     }
     .tab {
       border: 0;
       border-radius: 6px;
-      padding: 10px 16px;
+      padding: 8px 14px;
       color: var(--muted);
       background: transparent;
       cursor: pointer;
@@ -523,7 +549,7 @@ def home():
       padding-right: 6px;
     }
     .chat-panel {
-      padding: 24px;
+      padding: 18px;
       min-height: 0;
       flex: 1 1 auto;
       width: 100%;
@@ -636,7 +662,7 @@ def home():
     }
     .send:disabled { opacity: 0.6; cursor: wait; }
     .rightbar {
-      padding: 30px 22px;
+      padding: 22px 22px;
       border-left: 1px solid var(--line);
       background: rgba(5, 7, 19, 0.68);
       overflow-y: auto;
@@ -743,6 +769,14 @@ def home():
       text-align: center;
       color: var(--muted);
     }
+    .sidebar-empty {
+      padding: 11px 12px;
+      color: var(--muted);
+      border: 1px dashed var(--line);
+      border-radius: 8px;
+      font-size: 0.92rem;
+      line-height: 1.45;
+    }
     .danger { color: var(--danger); }
     @media (max-width: 1180px) {
       .app-shell { grid-template-columns: 280px minmax(0, 1fr); }
@@ -769,35 +803,36 @@ def home():
           <span>Your AI-powered research companion</span>
         </div>
       </div>
+      <div class="profile-field">
+        <label for="userName">Your name</label>
+        <input id="userName" type="text" placeholder="Enter your name" autocomplete="name" />
+      </div>
       <button class="new-chat" id="newChat">+ New Chat ✨</button>
 
       <div class="nav">
-        <button class="nav-item active">⌂ Home</button>
-        <button class="nav-item">▣ Library</button>
-        <button class="nav-item">☆ Starred</button>
-        <button class="nav-item">◴ Recent Chats</button>
+        <button class="nav-item active" id="navHome" data-nav="home">⌂ Home</button>
+        <button class="nav-item" id="navLibrary" data-nav="library">▣ Library</button>
+        <button class="nav-item" id="navRecent" data-nav="recent">◴ Recent Chats</button>
       </div>
 
       <div class="section-label">Recent Chats</div>
-      <button class="recent-item active">💬 <span>What is AI Governance?</span></button>
-      <button class="recent-item">💬 <span>Key principles of AI</span></button>
-      <button class="recent-item">💬 <span>AI risk management</span></button>
+      <div id="recentChats">
+        <div class="sidebar-empty">No recent chats yet.</div>
+      </div>
 
       <div class="section-label">Your Library</div>
-      <div class="library">
-        <div class="library-item active">📄 <span id="libraryFile">Upload a PDF</span></div>
-        <div class="library-item">📘 Responsible AI Guide.pdf</div>
-        <div class="library-item">📗 AI Risk Framework.pdf</div>
+      <div class="library" id="libraryList">
+        <div class="sidebar-empty">Upload PDFs to see them here.</div>
       </div>
     </aside>
 
     <main class="main">
       <div class="topbar">
         <div>
-          <h1>Good morning, Kritika! 👋</h1>
+          <h1 id="greetingTitle">Hello Researcher!</h1>
           <p class="subtitle">What would you like to research today?</p>
         </div>
-        <button class="share">↗ Share</button>
+        <button class="share" id="shareButton">↗ Share</button>
       </div>
 
       <div class="quick-grid">
@@ -900,7 +935,11 @@ def home():
   <script>
     const filesInput = document.getElementById("files");
     const fileStatus = document.getElementById("fileStatus");
-    const libraryFile = document.getElementById("libraryFile");
+    const userNameInput = document.getElementById("userName");
+    const greetingTitle = document.getElementById("greetingTitle");
+    const shareButton = document.getElementById("shareButton");
+    const libraryList = document.getElementById("libraryList");
+    const recentChats = document.getElementById("recentChats");
     const docTitle = document.getElementById("docTitle");
     const messages = document.getElementById("messages");
     const questionInput = document.getElementById("question");
@@ -920,6 +959,22 @@ def home():
     let streamingTimer = null;
     let activeAnswerNode = null;
     let pendingFinalAnswer = null;
+    let chatHistory = [];
+
+    const savedName = localStorage.getItem("ragUserName") || "";
+    userNameInput.value = savedName;
+    updateGreeting(savedName);
+
+    userNameInput.addEventListener("input", () => {
+      const cleanName = userNameInput.value.trim();
+      localStorage.setItem("ragUserName", cleanName);
+      updateGreeting(cleanName);
+    });
+
+    function updateGreeting(name) {
+      const displayName = name || "Researcher";
+      greetingTitle.textContent = `Hello ${displayName}!`;
+    }
 
     document.querySelectorAll(".tab").forEach(button => {
       button.addEventListener("click", () => {
@@ -929,6 +984,64 @@ def home():
         document.getElementById(button.dataset.tab + "Tab").classList.add("active");
       });
     });
+
+    document.querySelectorAll(".nav-item").forEach(button => {
+      button.addEventListener("click", () => {
+        document.querySelectorAll(".nav-item").forEach(item => item.classList.remove("active"));
+        button.classList.add("active");
+
+        if (button.dataset.nav === "home") {
+          activateTab("chat");
+          questionInput.focus();
+        }
+
+        if (button.dataset.nav === "library") {
+          filesInput.click();
+        }
+
+        if (button.dataset.nav === "recent") {
+          recentChats.scrollIntoView({ block: "nearest" });
+        }
+      });
+    });
+
+    shareButton.addEventListener("click", async () => {
+      const shareData = {
+        title: "AI RAG Research Assistant",
+        text: "Try my AI RAG Research Assistant.",
+        url: window.location.href
+      };
+
+      try {
+        if (navigator.share) {
+          await navigator.share(shareData);
+        } else {
+          await navigator.clipboard.writeText(window.location.href);
+          flashShareLabel("Copied link");
+        }
+      } catch (error) {
+        if (navigator.clipboard) {
+          await navigator.clipboard.writeText(window.location.href);
+          flashShareLabel("Copied link");
+        }
+      }
+    });
+
+    function activateTab(tabName) {
+      document.querySelectorAll(".tab").forEach(item => {
+        item.classList.toggle("active", item.dataset.tab === tabName);
+      });
+      document.querySelectorAll(".tab-view").forEach(item => item.classList.remove("active"));
+      document.getElementById(tabName + "Tab").classList.add("active");
+    }
+
+    function flashShareLabel(label) {
+      const original = shareButton.textContent;
+      shareButton.textContent = label;
+      setTimeout(() => {
+        shareButton.textContent = original;
+      }, 1600);
+    }
 
     document.querySelectorAll(".mode-button").forEach(button => {
       button.addEventListener("click", () => {
@@ -963,9 +1076,22 @@ def home():
       const files = Array.from(filesInput.files || []);
       const names = files.map(file => file.name);
       fileStatus.textContent = files.length ? `${files.length} file(s): ${names.join(", ")}` : "No document uploaded yet.";
-      libraryFile.textContent = names[0] || "Upload a PDF";
       docTitle.textContent = names[0] || "Upload research PDFs";
+      renderLibrary(names);
     });
+
+    function renderLibrary(names) {
+      if (!names.length) {
+        libraryList.innerHTML = '<div class="sidebar-empty">Upload PDFs to see them here.</div>';
+        return;
+      }
+
+      libraryList.innerHTML = names.map((name, index) => `
+        <button class="library-item ${index === 0 ? "active" : ""}" type="button">
+          📄 <span>${escapeHtml(name)}</span>
+        </button>
+      `).join("");
+    }
 
     askButton.addEventListener("click", askQuestion);
     questionInput.addEventListener("keydown", event => {
@@ -993,6 +1119,7 @@ def home():
       }
 
       addMessage("user", question);
+      updateRecentChats(question);
       const answerNode = addMessage("assistant", "", currentMode);
       latestAnswer = "";
       wordQueue = [];
@@ -1178,6 +1305,38 @@ def home():
       }
       const node = addMessage("assistant", message, currentMode);
       node.classList.add("danger");
+    }
+
+    function updateRecentChats(question) {
+      chatHistory = [question, ...chatHistory.filter(item => item !== question)].slice(0, 8);
+      renderRecentChats();
+    }
+
+    function renderRecentChats() {
+      if (!chatHistory.length) {
+        recentChats.innerHTML = '<div class="sidebar-empty">No recent chats yet.</div>';
+        return;
+      }
+
+      recentChats.innerHTML = chatHistory.map((item, index) => `
+        <button class="recent-item ${index === 0 ? "active" : ""}" type="button" data-question="${escapeHtml(item)}">
+          💬 <span>${escapeHtml(shortenText(item, 42))}</span>
+        </button>
+      `).join("");
+
+      recentChats.querySelectorAll(".recent-item").forEach(button => {
+        button.addEventListener("click", () => {
+          recentChats.querySelectorAll(".recent-item").forEach(item => item.classList.remove("active"));
+          button.classList.add("active");
+          questionInput.value = button.dataset.question || "";
+          activateTab("chat");
+          questionInput.focus();
+        });
+      });
+    }
+
+    function shortenText(text, maxLength) {
+      return text.length > maxLength ? text.slice(0, maxLength - 1) + "..." : text;
     }
 
     function updateInspector(trace) {
