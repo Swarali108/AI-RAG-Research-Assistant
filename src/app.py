@@ -1,9 +1,15 @@
+import os
 from typing import Any, Dict, List, Optional
 
+from dotenv import load_dotenv
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from google import genai
+from google.genai import types
 from pydantic import BaseModel
 
+
+load_dotenv()
 
 app = FastAPI(
     title="AI RAG Research Assistant",
@@ -22,11 +28,21 @@ app.add_middleware(
 class ChatRequest(BaseModel):
     message: str
     history: Optional[List[Dict[str, Any]]] = []
+    answer_mode: Optional[str] = "Research Mode"
 
 
 class ChatResponse(BaseModel):
     answer: str
     follow_up_questions: List[str] = []
+
+
+def get_gemini_client():
+    api_key = os.getenv("GEMINI_API_KEY")
+
+    if not api_key:
+        raise ValueError("GEMINI_API_KEY is missing. Add it in Vercel Environment Variables.")
+
+    return genai.Client(api_key=api_key)
 
 
 @app.get("/")
@@ -54,13 +70,48 @@ def chat(request: ChatRequest):
             follow_up_questions=[],
         )
 
-    # TODO: Connect your existing RAG / AI logic here.
-    # For now, this keeps the Vercel deployment working.
-    answer = f"Received your question: {user_message}"
+    history_text = ""
+
+    for message in request.history[-6:]:
+        role = message.get("role", "user")
+        content = message.get("content", "")
+        history_text += f"{role.upper()}: {content}\n"
+
+    prompt = f"""
+You are an AI Research Assistant.
+
+Answer clearly, accurately, and professionally.
+If the user asks for explanation, make it simple and structured.
+If you do not know something, say so instead of inventing facts.
+
+Conversation history:
+{history_text}
+
+User question:
+{user_message}
+
+Answer:
+"""
+
+    try:
+        client = get_gemini_client()
+
+        response = client.models.generate_content(
+            model="gemini-2.5-flash-lite",
+            contents=prompt,
+            config=types.GenerateContentConfig(
+                temperature=0.2,
+            ),
+        )
+
+        answer = response.text or "I could not generate an answer."
+
+    except Exception as error:
+        answer = f"Gemini API error: {str(error)}"
 
     follow_up_questions = [
-        "Can you explain this in more detail?",
-        "What sources support this answer?",
+        "Can you explain this in simpler terms?",
+        "Can you give an example?",
         "Can you summarize the key points?",
     ]
 
@@ -68,4 +119,4 @@ def chat(request: ChatRequest):
         answer=answer,
         follow_up_questions=follow_up_questions,
     )
-              
+       

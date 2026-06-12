@@ -1,13 +1,4 @@
-streamlit
-pypdf
-sentence-transformers
-faiss-cpu
-numpy
-pandas
+fastapi
+pydantic
 python-dotenv
 google-genai
-ddgs
-fastapi
-uvicorn
-flask
-pydantic
