@@ -76,23 +76,3 @@ pytest
 ```
 
 The retrieval logic is covered by deterministic unit tests in [`tests/`](tests/) that run fully offline (no API key required). CI runs them on every push via GitHub Actions.
-
-## Screenshots
-
-### Home Page
-![Home Page](screenshots/01-homepg.png)
-
-### Answer Generated
-![Answer Generated](screenshots/02-ansgenerated.png)
-
-### RAG Inspector
-![Pipeline](screenshots/03-pipeline.png)
-
-### Answer Details
-![Details](screenshots/04-details.png)
-
-### Project Status
-![Project Status](screenshots/05-projectstatus.png)
-
-### Citations
-![Citations](screenshots/06-citations.png)
