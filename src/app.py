@@ -1,8 +1,6 @@
-import html
+import hashlib
 import json
-import math
 import os
-import re
 from collections import Counter
 from io import BytesIO
 from typing import Any, Dict, List, Optional
@@ -16,56 +14,45 @@ from google.genai import types
 from pydantic import BaseModel
 from pypdf import PdfReader
 
+try:
+    from src.retrieval import hybrid_rank, tokenize
+except ImportError:  # when the app dir itself is on sys.path (some deploy setups)
+    from retrieval import hybrid_rank, tokenize
+
 
 load_dotenv()
 
 app = FastAPI(
     title="AI RAG Research Assistant",
-    version="1.1.0",
+    version="1.2.0",
 )
+
+# CORS origins are configurable; default stays permissive for the public demo,
+# but a deployment can lock it down via ALLOWED_ORIGINS=https://your-app.vercel.app
+_origins_env = os.getenv("ALLOWED_ORIGINS", "*").strip()
+ALLOWED_ORIGINS = ["*"] if _origins_env in ("", "*") else [
+    origin.strip() for origin in _origins_env.split(",") if origin.strip()
+]
+# Credentials cannot be combined with the "*" wildcard per the CORS spec.
+ALLOW_CREDENTIALS = ALLOWED_ORIGINS != ["*"]
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
+    allow_origins=ALLOWED_ORIGINS,
+    allow_credentials=ALLOW_CREDENTIALS,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
+MAX_UPLOAD_MB = float(os.getenv("MAX_UPLOAD_MB", "15"))
+MAX_UPLOAD_BYTES = int(MAX_UPLOAD_MB * 1024 * 1024)
 
-STOP_WORDS = {
-    "a",
-    "an",
-    "and",
-    "are",
-    "as",
-    "at",
-    "be",
-    "by",
-    "for",
-    "from",
-    "has",
-    "have",
-    "in",
-    "is",
-    "it",
-    "of",
-    "on",
-    "or",
-    "that",
-    "the",
-    "this",
-    "to",
-    "was",
-    "were",
-    "what",
-    "when",
-    "where",
-    "which",
-    "who",
-    "why",
-    "with",
-}
+EMBEDDING_MODEL = "text-embedding-004"
+
+# Cache parsed chunks + their embeddings keyed by a hash of the uploaded bytes,
+# so the same document is not re-parsed and re-embedded on every question.
+_DOCUMENT_CACHE: Dict[str, Dict[str, Any]] = {}
+_CACHE_MAX_ENTRIES = 32
 
 
 class ChatRequest(BaseModel):
@@ -88,9 +75,22 @@ def get_gemini_client():
     return genai.Client(api_key=api_key.strip())
 
 
-def tokenize(text: str) -> List[str]:
-    tokens = re.findall(r"[a-zA-Z0-9]+", text.lower())
-    return [token for token in tokens if len(token) > 2 and token not in STOP_WORDS]
+def embed_texts(texts: List[str], task_type: str) -> Optional[List[List[float]]]:
+    """Embed texts with Gemini. Returns None on any failure so callers can
+    gracefully fall back to lexical-only retrieval."""
+    if not texts:
+        return []
+
+    try:
+        client = get_gemini_client()
+        response = client.models.embed_content(
+            model=EMBEDDING_MODEL,
+            contents=texts,
+            config=types.EmbedContentConfig(task_type=task_type),
+        )
+        return [list(item.values) for item in response.embeddings]
+    except Exception:
+        return None
 
 
 def load_pdf_pages(file_bytes: bytes, source_name: str) -> List[Dict[str, Any]]:
@@ -145,47 +145,75 @@ def chunk_pages(pages: List[Dict[str, Any]], chunk_words: int = 220, overlap: in
     return chunks
 
 
-def lexical_score(question: str, chunk_text: str) -> float:
-    query_terms = Counter(tokenize(question))
-    chunk_terms = Counter(tokenize(chunk_text))
-
-    if not query_terms or not chunk_terms:
-        return 0.0
-
-    overlap = set(query_terms) & set(chunk_terms)
-    dot = sum(query_terms[word] * chunk_terms[word] for word in overlap)
-    query_norm = math.sqrt(sum(value * value for value in query_terms.values()))
-    chunk_norm = math.sqrt(sum(value * value for value in chunk_terms.values()))
-
-    if not query_norm or not chunk_norm:
-        return 0.0
-
-    return dot / (query_norm * chunk_norm)
+def _document_signature(files_payload: List[Dict[str, Any]]) -> str:
+    """Stable hash of the uploaded file bytes used as the cache key."""
+    hasher = hashlib.sha256()
+    for payload in sorted(files_payload, key=lambda item: item["filename"]):
+        hasher.update(payload["filename"].encode("utf-8"))
+        hasher.update(b"\0")
+        hasher.update(payload["bytes"])
+    return hasher.hexdigest()
 
 
-def retrieve_chunks(question: str, chunks: List[Dict[str, Any]], top_k: int = 4):
-    scored_chunks = []
-    question_terms = set(tokenize(question))
+def build_document_index(files_payload: List[Dict[str, Any]]) -> Dict[str, Any]:
+    """Parse, chunk, and embed the uploaded PDFs once, caching the result by
+    content hash. Returns chunks, their embeddings (or None), and page count."""
+    signature = _document_signature(files_payload)
+    cached = _DOCUMENT_CACHE.get(signature)
+    if cached is not None:
+        return cached
 
-    for chunk in chunks:
-        chunk_terms = set(tokenize(chunk["text"]))
-        score = lexical_score(question, chunk["text"])
-        scored_chunks.append(
-            {
-                **chunk,
-                "score": score,
-                "matched_terms": sorted(question_terms & chunk_terms),
-            }
+    pages = []
+    for payload in files_payload:
+        pages.extend(load_pdf_pages(payload["bytes"], payload["filename"]))
+
+    if not pages:
+        raise HTTPException(
+            status_code=400,
+            detail="No readable text was found in the uploaded PDFs.",
         )
 
-    scored_chunks.sort(key=lambda item: item["score"], reverse=True)
+    chunks = chunk_pages(pages)
+    chunk_embeddings = embed_texts(
+        [chunk["text"] for chunk in chunks], task_type="RETRIEVAL_DOCUMENT"
+    )
 
-    selected = [chunk for chunk in scored_chunks[:top_k] if chunk["score"] > 0]
+    index = {
+        "pages": len(pages),
+        "chunks": chunks,
+        "chunk_embeddings": chunk_embeddings,
+        "semantic": chunk_embeddings is not None,
+    }
 
-    if not selected:
-        selected = scored_chunks[: min(top_k, len(scored_chunks))]
+    # Simple FIFO bound so a long-lived process does not grow without limit.
+    if len(_DOCUMENT_CACHE) >= _CACHE_MAX_ENTRIES:
+        _DOCUMENT_CACHE.pop(next(iter(_DOCUMENT_CACHE)))
+    _DOCUMENT_CACHE[signature] = index
 
-    return selected
+    return index
+
+
+def retrieve_chunks(
+    question: str,
+    chunks: List[Dict[str, Any]],
+    chunk_embeddings: Optional[List[List[float]]] = None,
+    top_k: int = 4,
+):
+    """Hybrid (semantic + BM25) retrieval, with BM25-only fallback when no
+    embeddings are available."""
+    query_embedding = None
+    if chunk_embeddings is not None:
+        query_vectors = embed_texts([question], task_type="RETRIEVAL_QUERY")
+        if query_vectors:
+            query_embedding = query_vectors[0]
+
+    return hybrid_rank(
+        question,
+        chunks,
+        query_embedding=query_embedding,
+        chunk_embeddings=chunk_embeddings if query_embedding is not None else None,
+        top_k=top_k,
+    )
 
 
 def build_rag_prompt(question: str, retrieved_chunks: List[Dict[str, Any]], answer_mode: str):
@@ -249,19 +277,12 @@ Answer:
 
 
 def prepare_rag_trace(question: str, answer_mode: str, files_payload: List[Dict[str, Any]]):
-    pages = []
+    index = build_document_index(files_payload)
+    chunks = index["chunks"]
 
-    for payload in files_payload:
-        pages.extend(load_pdf_pages(payload["bytes"], payload["filename"]))
-
-    if not pages:
-        raise HTTPException(
-            status_code=400,
-            detail="No readable text was found in the uploaded PDFs.",
-        )
-
-    chunks = chunk_pages(pages)
-    retrieved_chunks = retrieve_chunks(question, chunks, top_k=4)
+    retrieved_chunks = retrieve_chunks(
+        question, chunks, chunk_embeddings=index["chunk_embeddings"], top_k=4
+    )
     prompt = build_rag_prompt(question, retrieved_chunks, answer_mode)
 
     citations = [
@@ -277,17 +298,26 @@ def prepare_rag_trace(question: str, answer_mode: str, files_payload: List[Dict[
         for chunk in retrieved_chunks
     ]
 
+    used_semantic = index["semantic"] and any(
+        chunk.get("semantic_score") for chunk in retrieved_chunks
+    )
+
     return {
         "question": question,
         "answer_mode": answer_mode,
-        "pages_processed": len(pages),
+        "pages_processed": index["pages"],
         "chunks_processed": len(chunks),
         "retrieved_chunks": citations,
         "prompt": prompt,
         "embedding_summary": {
-            "method": "Lightweight normalized keyword vectors",
+            "method": (
+                "Hybrid retrieval: Gemini text-embedding-004 (semantic) + BM25 (lexical)"
+                if used_semantic
+                else "BM25 lexical retrieval (semantic embeddings unavailable, fell back)"
+            ),
+            "model": EMBEDDING_MODEL,
             "query_terms": tokenize(question)[:16],
-            "note": "This Vercel-safe version uses local term-vector similarity instead of heavyweight sentence-transformers/FAISS.",
+            "semantic_active": used_semantic,
         },
     }
 
@@ -1433,10 +1463,18 @@ async def read_uploads(files: List[UploadFile]):
         if not upload.filename.lower().endswith(".pdf"):
             raise HTTPException(status_code=400, detail=f"{upload.filename} is not a PDF.")
 
+        data = await upload.read()
+
+        if len(data) > MAX_UPLOAD_BYTES:
+            raise HTTPException(
+                status_code=413,
+                detail=f"{upload.filename} exceeds the {MAX_UPLOAD_MB:.0f} MB upload limit.",
+            )
+
         payload.append(
             {
                 "filename": upload.filename,
-                "bytes": await upload.read(),
+                "bytes": data,
             }
         )
 
