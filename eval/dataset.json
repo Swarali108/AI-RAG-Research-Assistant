@@ -1,0 +1,26 @@
+{
+  "document": "docs/sample.pdf",
+  "description": "Small labeled set grounded in the bundled AI primer. A retrieved chunk is 'relevant' if it contains one of the expected key phrases.",
+  "cases": [
+    {
+      "question": "What is artificial intelligence?",
+      "expected": ["human intelligence", "reasoning", "learning"]
+    },
+    {
+      "question": "What are modern AI systems powered by?",
+      "expected": ["machine learning", "deep learning"]
+    },
+    {
+      "question": "What capabilities does AI include?",
+      "expected": ["perception", "decision-making", "problem solving"]
+    },
+    {
+      "question": "How do deep learning models learn?",
+      "expected": ["patterns", "data"]
+    },
+    {
+      "question": "What kinds of tasks does AI perform?",
+      "expected": ["tasks", "human intelligence"]
+    }
+  ]
+}

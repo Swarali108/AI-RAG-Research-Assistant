@@ -5,6 +5,7 @@ import re
 import time
 from collections import Counter
 from io import BytesIO
+from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from dotenv import load_dotenv
@@ -17,8 +18,22 @@ from pypdf import PdfReader
 
 try:
     from src.retrieval import hybrid_rank, tokenize
+    from src.reranker import rerank
+    from src.evaluation import (
+        aggregate_metrics,
+        judge_answer_relevance,
+        judge_faithfulness,
+        query_retrieval_metrics,
+    )
 except ImportError:  # when the app dir itself is on sys.path (some deploy setups)
     from retrieval import hybrid_rank, tokenize
+    from reranker import rerank
+    from evaluation import (
+        aggregate_metrics,
+        judge_answer_relevance,
+        judge_faithfulness,
+        query_retrieval_metrics,
+    )
 
 
 load_dotenv()
@@ -414,22 +429,26 @@ def retrieve_chunks(
     chunks: List[Dict[str, Any]],
     chunk_embeddings: Optional[List[List[float]]] = None,
     top_k: int = 4,
+    candidate_pool: int = 12,
 ):
-    """Hybrid (semantic + BM25) retrieval, with BM25-only fallback when no
-    embeddings are available."""
+    """Hybrid (semantic + BM25) retrieval over a wide candidate pool, then a
+    feature-based reranking pass (#3) to pick the final top_k. BM25-only
+    fallback applies when no embeddings are available."""
     query_embedding = None
     if chunk_embeddings is not None:
         query_vectors = embed_texts([question], task_type="RETRIEVAL_QUERY")
         if query_vectors:
             query_embedding = query_vectors[0]
 
-    return hybrid_rank(
+    candidates = hybrid_rank(
         question,
         chunks,
         query_embedding=query_embedding,
         chunk_embeddings=chunk_embeddings if query_embedding is not None else None,
-        top_k=top_k,
+        top_k=max(candidate_pool, top_k),
     )
+
+    return rerank(question, candidates, top_k=top_k)
 
 
 def build_rag_prompt(question: str, retrieved_chunks: List[Dict[str, Any]], answer_mode: str):
@@ -546,6 +565,8 @@ def prepare_rag_trace(question: str, answer_mode: str, files_payload: List[Dict[
             "section": chunk.get("section", ""),
             "chunk_id": chunk["chunk_id"],
             "score": chunk["score"],
+            "rerank_score": chunk.get("rerank_score"),
+            "rerank_features": chunk.get("rerank_features"),
             "preview": chunk["text"][:700],
             "matched_terms": chunk.get("matched_terms", []),
             "top_terms": chunk.get("top_terms", []),
@@ -2094,3 +2115,69 @@ def metrics_snapshot():
         "generation_model": GENERATION_MODEL,
         "embedding_model": EMBEDDING_MODEL,
     }
+
+
+def _judge(prompt: str) -> str:
+    return generate_answer(prompt, temperature=0.0, max_tokens=8)
+
+
+@app.get("/api/eval")
+def run_evaluation(k: int = 4, judge: bool = False):
+    """Run the bundled evaluation set (#4). Retrieval metrics (Hit Rate, MRR,
+    Recall@K, Precision@K) are free. Pass ?judge=true to also score Faithfulness
+    and Answer Relevance with an LLM judge (costs tokens — off by default)."""
+    root = Path(__file__).resolve().parents[1]
+    dataset_path = root / "eval" / "dataset.json"
+    if not dataset_path.exists():
+        raise HTTPException(status_code=404, detail="Evaluation dataset not found.")
+
+    dataset = json.loads(dataset_path.read_text(encoding="utf-8"))
+    doc_path = root / dataset["document"]
+    if not doc_path.exists():
+        raise HTTPException(status_code=404, detail=f"Eval document {dataset['document']} not found.")
+
+    index = build_document_index([{"filename": doc_path.name, "bytes": doc_path.read_bytes()}])
+
+    started = time.perf_counter()
+    per_query: List[Dict[str, float]] = []
+    cases_out: List[Dict[str, Any]] = []
+    judged: List[Dict[str, float]] = []
+
+    for case in dataset["cases"]:
+        retrieved = retrieve_chunks(
+            case["question"], index["chunks"], chunk_embeddings=index["chunk_embeddings"], top_k=k
+        )
+        texts = [c["text"] for c in retrieved]
+        metrics = query_retrieval_metrics(texts, case["expected"], k=k)
+        per_query.append(metrics)
+        row = {"question": case["question"], "expected": case["expected"], **metrics}
+
+        if judge:
+            answer = generate_answer(
+                build_rag_prompt(case["question"], retrieved, "Research Mode"),
+                temperature=0.2,
+                max_tokens=400,
+            )
+            faith = judge_faithfulness(answer, "\n\n".join(texts), _judge)
+            relevance = judge_answer_relevance(case["question"], answer, _judge)
+            row["faithfulness"] = faith
+            row["answer_relevance"] = relevance
+            judged.append({"faithfulness": faith, "answer_relevance": relevance})
+
+        cases_out.append(row)
+
+    result = {
+        "document": dataset["document"],
+        "k": k,
+        "semantic_active": index["semantic"],
+        "latency_ms": round((time.perf_counter() - started) * 1000),
+        "retrieval_metrics": aggregate_metrics(per_query),
+        "judge_used": judge,
+        "cases": cases_out,
+    }
+    if judge and judged:
+        result["answer_quality"] = {
+            "faithfulness": round(sum(j["faithfulness"] for j in judged) / len(judged), 3),
+            "answer_relevance": round(sum(j["answer_relevance"] for j in judged) / len(judged), 3),
+        }
+    return result
