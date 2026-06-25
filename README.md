@@ -17,14 +17,16 @@ Unlike a generic chatbot, this assistant answers from your uploaded documents an
 ## Key Features
 
 - PDF upload and page-wise text extraction (`pypdf`)
-- Word-window chunking with overlap
+- **Heading-aware chunking** that splits on section boundaries (markdown/numbered/ALL-CAPS headings) instead of blind fixed windows
 - **Hybrid retrieval**: embeddings (`openai/text-embedding-3-small` via OpenRouter) for semantic similarity, combined with BM25 lexical scoring, with automatic fallback to BM25-only when embeddings are unavailable
 - Per-document caching keyed by file content hash, so a PDF is parsed and embedded once per session instead of on every question
 - **Streamed** answer generation (Server-Sent Events) using `google/gemini-2.5-flash-lite` via OpenRouter
-- Source-grounded citations with file name, page number, and chunk ID
-- Two answer modes: **Research Mode** (professional, factual) and **Bestie Mode** (casual, fun)
-- Temperature tuned per mode for predictable vs. creative answers
-- **RAG Inspector** UI: query terms, retrieved chunks with similarity scores, matched terms, and the full prompt sent to the model
+- **Confidence scoring** from retrieval signals, with a clear low-confidence warning when an answer may not be grounded
+- **Source preview + citation highlighting**: see the exact document text used for each answer, with matched query terms highlighted
+- **Six Explain-Like modes**: Research, Beginner, Interview, Professor, 30-Second Summary, and Bestie — each with its own tone, temperature, and length budget
+- **Smart, document-aware follow-up suggestions** (generated from retrieval, no extra LLM cost)
+- **In-app observability** (`/api/metrics`): per-request latency, token usage, estimated cost, and session fallback rate
+- **RAG Inspector** UI: query terms, retrieved chunks with similarity scores, matched terms, confidence, request metrics, and the full prompt sent to the model
 - Single-page UI served directly by the backend — no separate frontend build
 
 ## Architecture

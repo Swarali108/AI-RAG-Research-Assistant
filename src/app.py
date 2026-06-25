@@ -1,6 +1,8 @@
 import hashlib
 import json
 import os
+import re
+import time
 from collections import Counter
 from io import BytesIO
 from typing import Any, Dict, List, Optional
@@ -65,6 +67,136 @@ GENERATION_MAX_TOKENS = int(os.getenv("OPENROUTER_MAX_OUTPUT_TOKENS", "800"))
 # so a huge PDF can't rack up embedding costs on every question.
 MAX_EMBED_CHUNKS = int(os.getenv("MAX_EMBED_CHUNKS", "250"))
 
+# --- Explain-Like modes (#13): pure prompt engineering, no extra LLM cost ---
+MODES: Dict[str, Dict[str, Any]] = {
+    "research": {
+        "label": "Research Mode",
+        "temperature": 0.2,
+        "max_tokens": GENERATION_MAX_TOKENS,
+        "tone": (
+            "Use Research Mode. Be professional, factual, concise, and recruiter-friendly. "
+            "Use clear structure and headings, avoid slang, and prioritize accuracy."
+        ),
+        "followups": [
+            "What evidence supports this answer?",
+            "Can you summarize the key points?",
+            "What are the limitations or caveats?",
+        ],
+    },
+    "bestie": {
+        "label": "Bestie Mode",
+        "temperature": 0.65,
+        "max_tokens": GENERATION_MAX_TOKENS,
+        "tone": (
+            "Use Bestie Mode. Be sassy, fun, and lightly chaotic, using casual internet "
+            "language naturally (bestie, ngl, lowkey, fr, the tea, TL;DR) without overdoing it. "
+            "Stay accurate, cite sources, never invent facts — useful first, funny second."
+        ),
+        "followups": [
+            "Spill the TL;DR.",
+            "Explain this like I'm sleep-deprived.",
+            "What's the actual tea here?",
+        ],
+    },
+    "beginner": {
+        "label": "Beginner Mode",
+        "temperature": 0.4,
+        "max_tokens": GENERATION_MAX_TOKENS,
+        "tone": (
+            "Use Beginner Mode. Assume no prior knowledge. Use simple words and short sentences, "
+            "define every piece of jargon in plain language, and use everyday analogies. Be patient "
+            "and encouraging. Never sacrifice accuracy."
+        ),
+        "followups": [
+            "Can you explain that with a simple analogy?",
+            "What does this term mean in plain English?",
+            "Why does this matter?",
+        ],
+    },
+    "interview": {
+        "label": "Interview Mode",
+        "temperature": 0.3,
+        "max_tokens": 700,
+        "tone": (
+            "Use Interview Mode. Optimize for interview preparation: lead with the crisp answer, then "
+            "tight bullet points of the key facts worth remembering. Highlight common follow-up angles "
+            "and gotchas. Be precise and structured."
+        ),
+        "followups": [
+            "What's a likely follow-up question on this?",
+            "How would I explain this in 60 seconds?",
+            "What's the most common misconception here?",
+        ],
+    },
+    "professor": {
+        "label": "Professor Mode",
+        "temperature": 0.3,
+        "max_tokens": 900,
+        "tone": (
+            "Use Professor Mode. Be rigorous and in-depth with an academic tone. Define terms precisely, "
+            "explain mechanisms and reasoning, note nuances, assumptions, and caveats, and structure the "
+            "answer logically. Cite the source material carefully."
+        ),
+        "followups": [
+            "Can you go deeper on the underlying mechanism?",
+            "What assumptions does this rely on?",
+            "How does this connect to broader theory?",
+        ],
+    },
+    "summary": {
+        "label": "30-Second Summary",
+        "temperature": 0.2,
+        "max_tokens": 240,
+        "tone": (
+            "Use 30-Second Summary Mode. Give the absolute essentials only: a one-line takeaway followed "
+            "by at most 3-5 short bullet points. No preamble, no filler. Fast to read."
+        ),
+        "followups": [
+            "Give me the full breakdown.",
+            "What's the single most important point?",
+            "What should I read next?",
+        ],
+    },
+}
+DEFAULT_MODE = "research"
+
+
+def resolve_mode(answer_mode: Optional[str]) -> str:
+    """Map a free-form answer_mode label from the UI to a MODES key."""
+    a = (answer_mode or "").lower()
+    if "bestie" in a or "friendly" in a:
+        return "bestie"
+    if "beginner" in a or "eli5" in a or "simple" in a:
+        return "beginner"
+    if "interview" in a:
+        return "interview"
+    if "professor" in a or "academic" in a:
+        return "professor"
+    if "30" in a or "summary" in a or "tl;dr" in a or "tldr" in a:
+        return "summary"
+    return DEFAULT_MODE
+
+
+# --- Cost/observability constants (#10): USD per token for the default models ---
+PRICE_PER_TOKEN = {
+    "embedding_in": 0.02 / 1_000_000,
+    "generation_in": 0.10 / 1_000_000,
+    "generation_out": 0.40 / 1_000_000,
+}
+
+# In-process metrics. Resets on cold start (fine for the lite version; Phase 2
+# persists these to Supabase). Surfaced via /api/metrics and the RAG Inspector.
+METRICS: Dict[str, float] = {
+    "requests": 0,
+    "semantic_requests": 0,
+    "fallback_requests": 0,
+    "embedding_tokens": 0,
+    "generation_prompt_tokens": 0,
+    "generation_completion_tokens": 0,
+    "errors": 0,
+    "total_cost_usd": 0.0,
+}
+
 # Cache parsed chunks + their embeddings keyed by a hash of the uploaded bytes,
 # so the same document is not re-parsed and re-embedded on every question.
 _DOCUMENT_CACHE: Dict[str, Dict[str, Any]] = {}
@@ -108,6 +240,9 @@ def embed_texts(texts: List[str], task_type: Optional[str] = None) -> Optional[L
     try:
         client = get_openrouter_client()
         response = client.embeddings.create(model=EMBEDDING_MODEL, input=texts)
+        usage = getattr(response, "usage", None)
+        if usage is not None:
+            METRICS["embedding_tokens"] += getattr(usage, "total_tokens", 0) or 0
         return [item.embedding for item in response.data]
     except Exception:
         return None
@@ -118,10 +253,13 @@ def load_pdf_pages(file_bytes: bytes, source_name: str) -> List[Dict[str, Any]]:
     pages = []
 
     for page_number, page in enumerate(reader.pages, start=1):
-        text = page.extract_text() or ""
-        text = " ".join(text.split())
+        raw = page.extract_text() or ""
+        # Keep line structure (collapse only intra-line whitespace) so that
+        # heading-aware chunking can detect section boundaries.
+        lines = [" ".join(line.split()) for line in raw.splitlines()]
+        text = "\n".join(line for line in lines if line)
 
-        if text:
+        if text.strip():
             pages.append(
                 {
                     "source": source_name,
@@ -133,34 +271,86 @@ def load_pdf_pages(file_bytes: bytes, source_name: str) -> List[Dict[str, Any]]:
     return pages
 
 
+_HEADING_RE = re.compile(r"^(#{1,6}\s+\S|\d+(\.\d+)*[.)]\s+\S)")
+
+
+def _is_heading(line: str) -> bool:
+    """Conservative heading detector: markdown, numbered, ALL-CAPS, or a short
+    line ending in a colon. Tuned to avoid flagging ordinary prose."""
+    words = line.split()
+    if not (1 <= len(words) <= 12):
+        return False
+    if _HEADING_RE.match(line):
+        return True
+    letters = [c for c in line if c.isalpha()]
+    if len(letters) >= 2 and line.upper() == line and len(words) <= 10:
+        return True
+    if len(words) <= 8 and line.endswith(":"):
+        return True
+    return False
+
+
+def _split_sections(page_text: str):
+    """Split a page into (heading, body) sections on detected heading lines."""
+    sections = []
+    current_heading = None
+    buffer: List[str] = []
+
+    for line in page_text.split("\n"):
+        if _is_heading(line):
+            if buffer:
+                sections.append((current_heading, " ".join(buffer)))
+                buffer = []
+            current_heading = re.sub(r"^#{1,6}\s+", "", line).strip().rstrip(":")
+        else:
+            buffer.append(line)
+
+    if buffer:
+        sections.append((current_heading, " ".join(buffer)))
+
+    if not sections:
+        sections = [(None, page_text.replace("\n", " "))]
+
+    return sections
+
+
 def chunk_pages(pages: List[Dict[str, Any]], chunk_words: int = 220, overlap: int = 45):
+    """Heading-aware chunking: split each page into sections, then window within
+    each section so chunks don't straddle topic boundaries. The section heading
+    is prepended to the chunk text to give retrieval and the LLM better context."""
     chunks = []
 
     for page in pages:
-        words = page["text"].split()
-        start = 0
         chunk_index = 1
 
-        while start < len(words):
-            end = start + chunk_words
-            chunk_text = " ".join(words[start:end])
+        for heading, body in _split_sections(page["text"]):
+            words = body.split()
+            if not words:
+                continue
 
-            if chunk_text:
-                chunks.append(
-                    {
-                        "source": page["source"],
-                        "page": page["page"],
-                        "chunk_id": f"{page['source']}_page_{page['page']}_chunk_{chunk_index}",
-                        "text": chunk_text,
-                        "top_terms": [term for term, _ in Counter(tokenize(chunk_text)).most_common(8)],
-                    }
-                )
+            start = 0
+            while start < len(words):
+                end = start + chunk_words
+                window = " ".join(words[start:end])
 
-            if end >= len(words):
-                break
+                if window:
+                    text = f"{heading}\n{window}" if heading else window
+                    chunks.append(
+                        {
+                            "source": page["source"],
+                            "page": page["page"],
+                            "section": heading or "",
+                            "chunk_id": f"{page['source']}_page_{page['page']}_chunk_{chunk_index}",
+                            "text": text,
+                            "top_terms": [term for term, _ in Counter(tokenize(text)).most_common(8)],
+                        }
+                    )
+                    chunk_index += 1
 
-            start = max(0, end - overlap)
-            chunk_index += 1
+                if end >= len(words):
+                    break
+
+                start = max(0, end - overlap)
 
     return chunks
 
@@ -261,23 +451,8 @@ Content:
 
     context = "\n".join(context_parts)
 
-    if "bestie" in answer_mode.lower() or "friendly" in answer_mode.lower():
-        tone_rule = """
-Use Bestie Mode.
-- Be sassy, sarcastic, fun, and lightly chaotic.
-- Use casual internet language naturally: bestie, ngl, lowkey, highkey, fr, respectfully, the tea, main character energy, absolutely cooked.
-- Use meme-style framing when it helps: "TL;DR", "the tea", "translation", "tiny reality check".
-- Do not overdo slang in every sentence.
-- Stay accurate, cite sources, and never invent facts.
-- Keep the answer useful first, funny second.
-"""
-    else:
-        tone_rule = """
-Use Research Mode.
-- Be professional, factual, concise, and recruiter-friendly.
-- Use clear structure and citations.
-- Avoid slang.
-"""
+    mode = MODES[resolve_mode(answer_mode)]
+    tone_rule = mode["tone"]
 
     return f"""
 You are an AI RAG Research Assistant.
@@ -302,6 +477,59 @@ Answer:
 """
 
 
+def compute_confidence(
+    retrieved_chunks: List[Dict[str, Any]], question: str, semantic_active: bool
+) -> Dict[str, Any]:
+    """Estimate how well the retrieved context supports an answer, from retrieval
+    signals only (no LLM call). Blends semantic similarity with query-term coverage."""
+    if not retrieved_chunks:
+        return {
+            "score": 0.0,
+            "label": "low",
+            "warning": "No relevant content was retrieved — the answer is unlikely to be grounded in your documents.",
+            "semantic_signal": 0.0,
+            "lexical_signal": 0.0,
+        }
+
+    top = retrieved_chunks[:3]
+
+    sem_vals = [float(c.get("semantic_score") or 0.0) for c in top]
+    sem_signal = sum(sem_vals) / len(sem_vals) if sem_vals else 0.0
+    # cosine ~0.6 with text-embedding-3-small already indicates a strong match.
+    sem_scaled = min(1.0, sem_signal / 0.6)
+
+    query_terms = set(tokenize(question))
+    if query_terms:
+        covered = set()
+        for c in top:
+            covered |= set(c.get("matched_terms", []))
+        lexical_signal = len(covered & query_terms) / len(query_terms)
+    else:
+        lexical_signal = 0.0
+
+    if semantic_active:
+        score = 0.6 * sem_scaled + 0.4 * lexical_signal
+    else:
+        score = lexical_signal
+
+    score = round(min(1.0, max(0.0, score)), 3)
+    label = "high" if score >= 0.6 else "medium" if score >= 0.35 else "low"
+    warning = (
+        "Low retrieval confidence — this answer may not be well supported by your documents. "
+        "Treat it cautiously, rephrase your question, or upload a more relevant document."
+        if label == "low"
+        else None
+    )
+
+    return {
+        "score": score,
+        "label": label,
+        "warning": warning,
+        "semantic_signal": round(sem_scaled, 3),
+        "lexical_signal": round(lexical_signal, 3),
+    }
+
+
 def prepare_rag_trace(question: str, answer_mode: str, files_payload: List[Dict[str, Any]]):
     index = build_document_index(files_payload)
     chunks = index["chunks"]
@@ -315,6 +543,7 @@ def prepare_rag_trace(question: str, answer_mode: str, files_payload: List[Dict[
         {
             "source": chunk["source"],
             "page": chunk["page"],
+            "section": chunk.get("section", ""),
             "chunk_id": chunk["chunk_id"],
             "score": chunk["score"],
             "preview": chunk["text"][:700],
@@ -327,13 +556,16 @@ def prepare_rag_trace(question: str, answer_mode: str, files_payload: List[Dict[
     used_semantic = index["semantic"] and any(
         chunk.get("semantic_score") for chunk in retrieved_chunks
     )
+    confidence = compute_confidence(retrieved_chunks, question, used_semantic)
 
     return {
         "question": question,
         "answer_mode": answer_mode,
+        "mode": MODES[resolve_mode(answer_mode)]["label"],
         "pages_processed": index["pages"],
         "chunks_processed": len(chunks),
         "retrieved_chunks": citations,
+        "confidence": confidence,
         "prompt": prompt,
         "embedding_summary": {
             "method": (
@@ -348,46 +580,106 @@ def prepare_rag_trace(question: str, answer_mode: str, files_payload: List[Dict[
     }
 
 
-def generate_answer(prompt: str, temperature: float = 0.2):
+def generate_answer(prompt: str, temperature: float = 0.2, max_tokens: Optional[int] = None):
     client = get_openrouter_client()
     response = client.chat.completions.create(
         model=GENERATION_MODEL,
         messages=[{"role": "user", "content": prompt}],
         temperature=temperature,
-        max_tokens=GENERATION_MAX_TOKENS,
+        max_tokens=max_tokens or GENERATION_MAX_TOKENS,
     )
+    usage = getattr(response, "usage", None)
+    if usage is not None:
+        _record_generation_usage(usage.prompt_tokens, usage.completion_tokens)
     return response.choices[0].message.content or "I could not generate an answer."
 
 
-def stream_answer(prompt: str, temperature: float = 0.2):
+def stream_answer(
+    prompt: str,
+    temperature: float = 0.2,
+    max_tokens: Optional[int] = None,
+    usage_sink: Optional[Dict[str, int]] = None,
+):
     client = get_openrouter_client()
     stream = client.chat.completions.create(
         model=GENERATION_MODEL,
         messages=[{"role": "user", "content": prompt}],
         temperature=temperature,
-        max_tokens=GENERATION_MAX_TOKENS,
+        max_tokens=max_tokens or GENERATION_MAX_TOKENS,
         stream=True,
+        stream_options={"include_usage": True},
     )
 
     for chunk in stream:
+        usage = getattr(chunk, "usage", None)
+        if usage is not None and usage_sink is not None:
+            usage_sink["prompt_tokens"] = usage.prompt_tokens or 0
+            usage_sink["completion_tokens"] = usage.completion_tokens or 0
         delta = chunk.choices[0].delta.content if chunk.choices else None
         if delta:
             yield delta
 
 
-def follow_up_questions(answer_mode: str = "Research Mode"):
-    if "bestie" in answer_mode.lower() or "friendly" in answer_mode.lower():
-        return [
-            "Spill the TL;DR.",
-            "Explain this like I am sleep-deprived.",
-            "What is the actual tea here?",
-        ]
+def follow_up_questions(
+    answer_mode: str = "Research Mode", retrieved_chunks: Optional[List[Dict[str, Any]]] = None
+):
+    """Budget-safe smart follow-ups: mode-appropriate templates, made document-aware
+    by weaving in the top terms from the retrieved chunks. No LLM call."""
+    suggestions = list(MODES[resolve_mode(answer_mode)]["followups"])
 
-    return [
-        "Can you summarize the key points?",
-        "What evidence supports this answer?",
-        "Can you explain this with an example?",
-    ]
+    topics: List[str] = []
+    for chunk in retrieved_chunks or []:
+        for term in chunk.get("top_terms", []):
+            if term not in topics:
+                topics.append(term)
+
+    if topics:
+        suggestions.insert(0, f"Tell me more about {topics[0]}.")
+        if len(topics) > 1:
+            suggestions.append(f"How does {topics[1]} relate to this?")
+
+    return suggestions[:4]
+
+
+def _record_generation_usage(prompt_tokens: Optional[int], completion_tokens: Optional[int]):
+    METRICS["generation_prompt_tokens"] += prompt_tokens or 0
+    METRICS["generation_completion_tokens"] += completion_tokens or 0
+
+
+def estimate_cost(embedding_tokens: int, prompt_tokens: int, completion_tokens: int) -> float:
+    return (
+        embedding_tokens * PRICE_PER_TOKEN["embedding_in"]
+        + prompt_tokens * PRICE_PER_TOKEN["generation_in"]
+        + completion_tokens * PRICE_PER_TOKEN["generation_out"]
+    )
+
+
+def build_request_metrics(
+    latency_ms: float,
+    embedding_tokens: int,
+    prompt_tokens: int,
+    completion_tokens: int,
+    semantic_active: bool,
+) -> Dict[str, Any]:
+    """Update session counters and return a per-request metrics summary (#10)."""
+    cost = estimate_cost(embedding_tokens, prompt_tokens, completion_tokens)
+
+    METRICS["requests"] += 1
+    METRICS["semantic_requests" if semantic_active else "fallback_requests"] += 1
+    METRICS["total_cost_usd"] += cost
+
+    requests = max(1, int(METRICS["requests"]))
+    return {
+        "latency_ms": round(latency_ms),
+        "embedding_tokens": embedding_tokens,
+        "prompt_tokens": prompt_tokens,
+        "completion_tokens": completion_tokens,
+        "request_cost_usd": round(cost, 6),
+        "retrieval_mode": "hybrid (semantic + BM25)" if semantic_active else "BM25 fallback",
+        "session_requests": requests,
+        "session_fallback_rate": round(METRICS["fallback_requests"] / requests, 3),
+        "session_total_cost_usd": round(METRICS["total_cost_usd"], 6),
+    }
 
 
 def serialize_event(event: str, data: Dict[str, Any]):
@@ -690,9 +982,9 @@ def home():
     }
     .mode-toggle {
       display: grid;
-      grid-template-columns: repeat(2, 1fr);
+      grid-template-columns: repeat(3, 1fr);
       gap: 6px;
-      width: min(520px, 100%);
+      width: min(620px, 100%);
       padding: 4px;
       border: 1px solid var(--line);
       border-radius: 8px;
@@ -701,11 +993,14 @@ def home():
     .mode-button {
       border: 0;
       border-radius: 6px;
-      padding: 12px;
+      padding: 9px 8px;
       color: var(--muted);
       background: transparent;
       cursor: pointer;
+      font-size: 0.82rem;
+      line-height: 1.2;
     }
+    .mode-button small { opacity: 0.75; font-size: 0.72rem; }
     .mode-button.active {
       color: white;
       background: linear-gradient(135deg, rgba(155, 92, 255, 0.86), rgba(240, 106, 191, 0.72));
@@ -838,6 +1133,70 @@ def home():
       line-height: 1.45;
     }
     .danger { color: var(--danger); }
+    .conf-chip {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      margin: 2px 0 12px;
+      padding: 6px 11px;
+      border-radius: 999px;
+      font-size: 0.82rem;
+      font-weight: 700;
+      border: 1px solid var(--line);
+    }
+    .conf-high { color: #bdf7d6; background: rgba(96, 243, 169, 0.12); border-color: rgba(96, 243, 169, 0.3); }
+    .conf-medium { color: #ffe2b0; background: rgba(251, 191, 36, 0.12); border-color: rgba(251, 191, 36, 0.32); }
+    .conf-low { color: #ffc3cf; background: rgba(251, 113, 133, 0.12); border-color: rgba(251, 113, 133, 0.34); }
+    .answer-warning {
+      margin: 10px 0 0;
+      padding: 10px 12px;
+      border-radius: 8px;
+      font-size: 0.86rem;
+      color: #ffc3cf;
+      background: rgba(251, 113, 133, 0.1);
+      border: 1px solid rgba(251, 113, 133, 0.3);
+    }
+    .sources { margin-top: 14px; border-top: 1px solid var(--line); padding-top: 10px; }
+    .sources > summary {
+      cursor: pointer;
+      font-weight: 700;
+      color: var(--cyan);
+      font-size: 0.88rem;
+      list-style: none;
+    }
+    .source-item {
+      margin-top: 10px;
+      padding: 10px 12px;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: rgba(8, 12, 28, 0.6);
+    }
+    .source-item strong { font-size: 0.86rem; }
+    .source-item .source-text {
+      margin-top: 6px;
+      font-size: 0.82rem;
+      color: var(--muted);
+      line-height: 1.5;
+      max-height: 150px;
+      overflow: auto;
+      white-space: pre-wrap;
+    }
+    mark {
+      background: rgba(155, 92, 255, 0.42);
+      color: #fff;
+      border-radius: 3px;
+      padding: 0 2px;
+    }
+    .answer-metrics {
+      margin-top: 10px;
+      font-size: 0.76rem;
+      color: var(--muted);
+      display: flex;
+      flex-wrap: wrap;
+      gap: 6px 14px;
+    }
+    .followups-wrap { margin-top: 12px; }
+    .followups-wrap .section-label { margin: 0 0 8px; }
     @media (max-width: 1180px) {
       .app-shell { grid-template-columns: 280px minmax(0, 1fr); }
       .rightbar { display: none; }
@@ -917,8 +1276,12 @@ def home():
             <textarea id="question" placeholder="Ask a follow-up question..."></textarea>
             <div class="composer-actions">
               <div class="mode-toggle">
-                <button class="mode-button active" data-mode="Research Mode">🔬 Research Mode<br><small>Professional & factual</small></button>
-                <button class="mode-button" data-mode="Bestie Mode">✨ Bestie Mode<br><small>Sassy, fun & chaotic</small></button>
+                <button class="mode-button active" data-mode="Research Mode">🔬 Research<br><small>Professional</small></button>
+                <button class="mode-button" data-mode="Beginner Mode">🌱 Beginner<br><small>Plain & simple</small></button>
+                <button class="mode-button" data-mode="Interview Mode">🎯 Interview<br><small>Prep-ready</small></button>
+                <button class="mode-button" data-mode="Professor Mode">🎓 Professor<br><small>In-depth</small></button>
+                <button class="mode-button" data-mode="30-Second Summary">⚡ 30-Sec<br><small>TL;DR</small></button>
+                <button class="mode-button" data-mode="Bestie Mode">✨ Bestie<br><small>Sassy & fun</small></button>
               </div>
               <button class="send" id="askButton">➤</button>
             </div>
@@ -1250,6 +1613,7 @@ def home():
 
       if (eventName === "trace") {
         updateInspector(payload);
+        renderAnswerMeta(answerNode, payload);
       }
 
       if (eventName === "chunk") {
@@ -1263,6 +1627,9 @@ def home():
           answerNode.textContent = latestAnswer;
           inspectAnswer.textContent = latestAnswer;
         }
+        renderMetrics(answerNode, payload.metrics);
+        renderFollowUps(payload.follow_up_questions);
+        showInspectorMetrics(payload.metrics);
       }
 
       if (eventName === "error") {
@@ -1334,7 +1701,7 @@ def home():
       if (role === "assistant") {
         const pill = document.createElement("div");
         pill.className = "mode-pill";
-        pill.textContent = mode === "Bestie Mode" ? "✨ Bestie Mode" : "🔬 Research Mode";
+        pill.textContent = modeLabel(mode);
         bubble.appendChild(pill);
         const answer = document.createElement("div");
         answer.textContent = content || "Thinking...";
@@ -1414,7 +1781,9 @@ def home():
       }
 
       inspectQuestion.textContent = trace.question;
-      inspectEmbeddings.textContent = JSON.stringify(trace.embedding_summary, null, 2);
+      inspectEmbeddings.textContent = JSON.stringify(
+        { ...trace.embedding_summary, confidence: trace.confidence }, null, 2
+      );
       inspectPrompt.textContent = trace.prompt;
       pageCount.textContent = trace.pages_processed;
       chunkCount.textContent = trace.chunks_processed;
@@ -1433,10 +1802,112 @@ def home():
             <strong>Chunk ${index + 1}: ${escapeHtml(chunk.source)} · Page ${chunk.page}</strong>
             <div class="muted">Score ${Number(chunk.score).toFixed(3)} · Matched: ${(chunk.matched_terms || []).map(escapeHtml).join(", ") || "No exact keyword overlap"}</div>
             <div class="score-track"><div class="score-fill" style="width:${percent}%"></div></div>
-            <pre>${escapeHtml(chunk.preview)}</pre>
+            <pre>${highlightTerms(chunk.preview, chunk.matched_terms)}</pre>
           </div>
         `;
       }).join("");
+    }
+
+    function modeLabel(mode) {
+      const map = {
+        "Research Mode": "🔬 Research Mode",
+        "Beginner Mode": "🌱 Beginner Mode",
+        "Interview Mode": "🎯 Interview Mode",
+        "Professor Mode": "🎓 Professor Mode",
+        "30-Second Summary": "⚡ 30-Second Summary",
+        "Bestie Mode": "✨ Bestie Mode"
+      };
+      return map[mode] || "🔬 Research Mode";
+    }
+
+    function highlightTerms(text, terms) {
+      let safe = escapeHtml(text);
+      const seen = new Set();
+      (terms || []).forEach(term => {
+        const t = String(term).trim();
+        if (t.length < 2) return;
+        const key = t.toLowerCase();
+        if (seen.has(key)) return;
+        seen.add(key);
+        // matched_terms/top_terms are alphanumeric tokens, safe to use directly
+        safe = safe.replace(new RegExp("(" + t + ")", "gi"), "<mark>$1</mark>");
+      });
+      return safe;
+    }
+
+    function renderAnswerMeta(answerNode, trace) {
+      const bubble = answerNode.parentElement;
+      if (!bubble || bubble.dataset.metaDone) return;
+      bubble.dataset.metaDone = "1";
+
+      const conf = trace.confidence || {};
+      const pct = Math.round((Number(conf.score) || 0) * 100);
+      const label = conf.label || "low";
+
+      const chip = document.createElement("div");
+      chip.className = "conf-chip conf-" + label;
+      chip.textContent = "🎯 Confidence: " + pct + "% · " + label;
+      bubble.insertBefore(chip, answerNode);
+
+      if (conf.warning) {
+        const warn = document.createElement("div");
+        warn.className = "answer-warning";
+        warn.textContent = "⚠️ " + conf.warning;
+        bubble.appendChild(warn);
+      }
+
+      const chunks = trace.retrieved_chunks || [];
+      if (chunks.length) {
+        const details = document.createElement("details");
+        details.className = "sources";
+        details.innerHTML =
+          "<summary>📚 Sources (" + chunks.length + ") — exact text used for this answer</summary>" +
+          chunks.map((c, i) =>
+            '<div class="source-item"><strong>[' + (i + 1) + '] ' + escapeHtml(c.source) +
+            ' · Page ' + c.page + '</strong> <span class="muted">· score ' +
+            Number(c.score).toFixed(3) + (c.section ? ' · ' + escapeHtml(c.section) : '') +
+            '</span><div class="source-text">' +
+            highlightTerms(c.preview || "", c.matched_terms) + '</div></div>'
+          ).join("");
+        bubble.appendChild(details);
+      }
+    }
+
+    function renderMetrics(answerNode, metrics) {
+      if (!metrics) return;
+      const bubble = answerNode.parentElement;
+      if (!bubble) return;
+      const line = document.createElement("div");
+      line.className = "answer-metrics";
+      const tokens = (metrics.prompt_tokens || 0) + (metrics.completion_tokens || 0);
+      line.innerHTML =
+        "<span>⏱ " + metrics.latency_ms + " ms</span>" +
+        "<span>🔢 " + tokens + " tokens</span>" +
+        "<span>💸 $" + (Number(metrics.request_cost_usd) || 0).toFixed(5) + "</span>" +
+        "<span>🔎 " + escapeHtml(metrics.retrieval_mode || "") + "</span>";
+      bubble.appendChild(line);
+    }
+
+    function renderFollowUps(list) {
+      if (!list || !list.length) return;
+      const wrap = document.querySelector(".question-list");
+      if (!wrap) return;
+      wrap.innerHTML = list.map(q => '<button class="suggestion">' + escapeHtml(q) + "</button>").join("");
+      wrap.querySelectorAll(".suggestion").forEach(btn => {
+        btn.addEventListener("click", () => { questionInput.value = btn.textContent.trim(); });
+      });
+    }
+
+    function showInspectorMetrics(metrics) {
+      if (!metrics || !inspectChunks) return;
+      const banner =
+        '<div class="score-row"><strong>📊 Request metrics</strong><div class="muted">Latency ' +
+        metrics.latency_ms + " ms · Prompt " + metrics.prompt_tokens + " tok · Completion " +
+        metrics.completion_tokens + " tok · Embed " + metrics.embedding_tokens + " tok · Cost $" +
+        (Number(metrics.request_cost_usd) || 0).toFixed(5) + " · " + escapeHtml(metrics.retrieval_mode || "") +
+        " · Session fallback " + Math.round((Number(metrics.session_fallback_rate) || 0) * 100) +
+        "%</div></div>";
+      inspectChunks.innerHTML = banner + inspectChunks.innerHTML;
     }
 
     function escapeHtml(value) {
@@ -1522,17 +1993,36 @@ async def research(
     if not clean_question:
         raise HTTPException(status_code=400, detail="Please enter a question.")
 
+    started = time.perf_counter()
+    embedding_before = METRICS["embedding_tokens"]
     trace = prepare_rag_trace(clean_question, answer_mode, await read_uploads(files))
+    embedding_used = METRICS["embedding_tokens"] - embedding_before
+
+    mode = MODES[resolve_mode(answer_mode)]
+    prompt_before = METRICS["generation_prompt_tokens"]
+    completion_before = METRICS["generation_completion_tokens"]
 
     try:
-        answer = generate_answer(trace["prompt"], temperature=0.55 if "bestie" in answer_mode.lower() else 0.2)
+        answer = generate_answer(
+            trace["prompt"], temperature=mode["temperature"], max_tokens=mode["max_tokens"]
+        )
     except Exception as error:
+        METRICS["errors"] += 1
         raise HTTPException(status_code=500, detail=f"Model API error: {str(error)}") from error
+
+    metrics = build_request_metrics(
+        latency_ms=(time.perf_counter() - started) * 1000,
+        embedding_tokens=embedding_used,
+        prompt_tokens=METRICS["generation_prompt_tokens"] - prompt_before,
+        completion_tokens=METRICS["generation_completion_tokens"] - completion_before,
+        semantic_active=trace["embedding_summary"]["semantic_active"],
+    )
 
     return {
         **trace,
         "answer": answer,
-        "follow_up_questions": follow_up_questions(answer_mode),
+        "follow_up_questions": follow_up_questions(answer_mode, trace["retrieved_chunks"]),
+        "metrics": metrics,
     }
 
 
@@ -1547,23 +2037,60 @@ async def research_stream(
     if not clean_question:
         raise HTTPException(status_code=400, detail="Please enter a question.")
 
+    started = time.perf_counter()
+    embedding_before = METRICS["embedding_tokens"]
     trace = prepare_rag_trace(clean_question, answer_mode, await read_uploads(files))
-    temperature = 0.65 if "bestie" in answer_mode.lower() else 0.2
+    embedding_used = METRICS["embedding_tokens"] - embedding_before
+
+    mode = MODES[resolve_mode(answer_mode)]
+    semantic_active = trace["embedding_summary"]["semantic_active"]
 
     def event_stream():
         answer_parts = []
-        safe_trace = {key: value for key, value in trace.items() if key != "prompt"}
-        safe_trace["prompt"] = trace["prompt"]
+        usage_sink: Dict[str, int] = {"prompt_tokens": 0, "completion_tokens": 0}
 
-        yield serialize_event("trace", safe_trace)
+        yield serialize_event("trace", trace)
 
         try:
-            for text in stream_answer(trace["prompt"], temperature=temperature):
+            for text in stream_answer(
+                trace["prompt"],
+                temperature=mode["temperature"],
+                max_tokens=mode["max_tokens"],
+                usage_sink=usage_sink,
+            ):
                 answer_parts.append(text)
                 yield serialize_event("chunk", {"text": text})
 
-            yield serialize_event("done", {"answer": "".join(answer_parts)})
+            _record_generation_usage(usage_sink["prompt_tokens"], usage_sink["completion_tokens"])
+            metrics = build_request_metrics(
+                latency_ms=(time.perf_counter() - started) * 1000,
+                embedding_tokens=embedding_used,
+                prompt_tokens=usage_sink["prompt_tokens"],
+                completion_tokens=usage_sink["completion_tokens"],
+                semantic_active=semantic_active,
+            )
+            yield serialize_event(
+                "done",
+                {
+                    "answer": "".join(answer_parts),
+                    "follow_up_questions": follow_up_questions(answer_mode, trace["retrieved_chunks"]),
+                    "metrics": metrics,
+                },
+            )
         except Exception as error:
+            METRICS["errors"] += 1
             yield serialize_event("error", {"message": f"Model API error: {str(error)}"})
 
     return StreamingResponse(event_stream(), media_type="text/event-stream")
+
+
+@app.get("/api/metrics")
+def metrics_snapshot():
+    """Session-level observability counters (#10). Resets on cold start."""
+    requests = max(1, int(METRICS["requests"]))
+    return {
+        **{k: (round(v, 6) if isinstance(v, float) else v) for k, v in METRICS.items()},
+        "fallback_rate": round(METRICS["fallback_requests"] / requests, 3),
+        "generation_model": GENERATION_MODEL,
+        "embedding_model": EMBEDDING_MODEL,
+    }
