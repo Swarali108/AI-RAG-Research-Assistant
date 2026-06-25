@@ -9,8 +9,7 @@ from dotenv import load_dotenv
 from fastapi import FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse, StreamingResponse
-from google import genai
-from google.genai import types
+from openai import OpenAI
 from pydantic import BaseModel
 from pypdf import PdfReader
 
@@ -47,7 +46,17 @@ app.add_middleware(
 MAX_UPLOAD_MB = float(os.getenv("MAX_UPLOAD_MB", "15"))
 MAX_UPLOAD_BYTES = int(MAX_UPLOAD_MB * 1024 * 1024)
 
-EMBEDDING_MODEL = "text-embedding-004"
+# All LLM calls go through OpenRouter (OpenAI-compatible API).
+OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
+# Generation: cheap + strong for grounded RAG answers.
+GENERATION_MODEL = os.getenv("OPENROUTER_MODEL", "google/gemini-2.5-flash-lite")
+# Embeddings: nearly free, powers hybrid semantic retrieval.
+EMBEDDING_MODEL = os.getenv("OPENROUTER_EMBEDDING_MODEL", "openai/text-embedding-3-small")
+# Optional attribution headers shown on OpenRouter dashboards.
+OPENROUTER_HEADERS = {
+    "HTTP-Referer": os.getenv("OPENROUTER_SITE_URL", "https://github.com/Swarali108/AI-RAG-Research-Assistant"),
+    "X-Title": os.getenv("OPENROUTER_SITE_NAME", "AI RAG Research Assistant"),
+}
 
 # Cache parsed chunks + their embeddings keyed by a hash of the uploaded bytes,
 # so the same document is not re-parsed and re-embedded on every question.
@@ -66,29 +75,33 @@ class ChatResponse(BaseModel):
     follow_up_questions: List[str] = []
 
 
-def get_gemini_client():
-    api_key = os.getenv("GEMINI_API_KEY")
+def get_openrouter_client():
+    api_key = os.getenv("OPENROUTER_API_KEY")
 
     if not api_key:
-        raise ValueError("GEMINI_API_KEY is missing. Add it in Vercel Environment Variables.")
+        raise ValueError(
+            "OPENROUTER_API_KEY is missing. Add it to your .env file (or Vercel "
+            "Environment Variables) as OPENROUTER_API_KEY=sk-or-..."
+        )
 
-    return genai.Client(api_key=api_key.strip())
+    return OpenAI(
+        base_url=OPENROUTER_BASE_URL,
+        api_key=api_key.strip(),
+        default_headers=OPENROUTER_HEADERS,
+    )
 
 
-def embed_texts(texts: List[str], task_type: str) -> Optional[List[List[float]]]:
-    """Embed texts with Gemini. Returns None on any failure so callers can
-    gracefully fall back to lexical-only retrieval."""
+def embed_texts(texts: List[str], task_type: Optional[str] = None) -> Optional[List[List[float]]]:
+    """Embed texts via OpenRouter. Returns None on any failure so callers can
+    gracefully fall back to lexical-only (BM25) retrieval. ``task_type`` is kept
+    for call-site clarity but is not required by the embedding model."""
     if not texts:
         return []
 
     try:
-        client = get_gemini_client()
-        response = client.models.embed_content(
-            model=EMBEDDING_MODEL,
-            contents=texts,
-            config=types.EmbedContentConfig(task_type=task_type),
-        )
-        return [list(item.values) for item in response.embeddings]
+        client = get_openrouter_client()
+        response = client.embeddings.create(model=EMBEDDING_MODEL, input=texts)
+        return [item.embedding for item in response.data]
     except Exception:
         return None
 
@@ -311,7 +324,7 @@ def prepare_rag_trace(question: str, answer_mode: str, files_payload: List[Dict[
         "prompt": prompt,
         "embedding_summary": {
             "method": (
-                "Hybrid retrieval: Gemini text-embedding-004 (semantic) + BM25 (lexical)"
+                f"Hybrid retrieval: {EMBEDDING_MODEL} (semantic) + BM25 (lexical), via OpenRouter"
                 if used_semantic
                 else "BM25 lexical retrieval (semantic embeddings unavailable, fell back)"
             ),
@@ -323,26 +336,28 @@ def prepare_rag_trace(question: str, answer_mode: str, files_payload: List[Dict[
 
 
 def generate_answer(prompt: str, temperature: float = 0.2):
-    client = get_gemini_client()
-    response = client.models.generate_content(
-        model="gemini-2.5-flash-lite",
-        contents=prompt,
-        config=types.GenerateContentConfig(temperature=temperature),
+    client = get_openrouter_client()
+    response = client.chat.completions.create(
+        model=GENERATION_MODEL,
+        messages=[{"role": "user", "content": prompt}],
+        temperature=temperature,
     )
-    return response.text or "I could not generate an answer."
+    return response.choices[0].message.content or "I could not generate an answer."
 
 
 def stream_answer(prompt: str, temperature: float = 0.2):
-    client = get_gemini_client()
-    stream = client.models.generate_content_stream(
-        model="gemini-2.5-flash-lite",
-        contents=prompt,
-        config=types.GenerateContentConfig(temperature=temperature),
+    client = get_openrouter_client()
+    stream = client.chat.completions.create(
+        model=GENERATION_MODEL,
+        messages=[{"role": "user", "content": prompt}],
+        temperature=temperature,
+        stream=True,
     )
 
     for chunk in stream:
-        if chunk.text:
-            yield chunk.text
+        delta = chunk.choices[0].delta.content if chunk.choices else None
+        if delta:
+            yield delta
 
 
 def follow_up_questions(answer_mode: str = "Research Mode"):
@@ -911,7 +926,7 @@ def home():
             <div id="inspectChunks" class="muted">No retrieved chunks yet.</div>
           </div>
           <div class="inspector-panel full">
-            <h3>Prompt Sent To Gemini</h3>
+            <h3>Prompt Sent To the Model</h3>
             <pre id="inspectPrompt">The full context-injected prompt will appear here.</pre>
           </div>
           <div class="inspector-panel full">
@@ -1445,7 +1460,7 @@ def chat(request: ChatRequest):
     try:
         answer = generate_answer(prompt)
     except Exception as error:
-        answer = f"Gemini API error: {str(error)}"
+        answer = f"Model API error: {str(error)}"
 
     return ChatResponse(
         answer=answer,
@@ -1497,7 +1512,7 @@ async def research(
     try:
         answer = generate_answer(trace["prompt"], temperature=0.55 if "bestie" in answer_mode.lower() else 0.2)
     except Exception as error:
-        raise HTTPException(status_code=500, detail=f"Gemini API error: {str(error)}") from error
+        raise HTTPException(status_code=500, detail=f"Model API error: {str(error)}") from error
 
     return {
         **trace,
@@ -1534,6 +1549,6 @@ async def research_stream(
 
             yield serialize_event("done", {"answer": "".join(answer_parts)})
         except Exception as error:
-            yield serialize_event("error", {"message": f"Gemini API error: {str(error)}"})
+            yield serialize_event("error", {"message": f"Model API error: {str(error)}"})
 
     return StreamingResponse(event_stream(), media_type="text/event-stream")

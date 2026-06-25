@@ -10,7 +10,7 @@ _Add your deployment URL here (e.g. your Vercel app link)._
 
 This project implements a complete Retrieval Augmented Generation (RAG) pipeline as a single self-contained [FastAPI](https://fastapi.tiangolo.com/) service that is safe to deploy on serverless platforms like Vercel.
 
-Users upload PDF documents. The system extracts text, chunks it, retrieves the most relevant chunks for a question using **hybrid retrieval** (semantic embeddings + BM25 lexical scoring), injects them into a grounded prompt, and streams an answer from Google Gemini — with citations back to the source file, page, and chunk.
+Users upload PDF documents. The system extracts text, chunks it, retrieves the most relevant chunks for a question using **hybrid retrieval** (semantic embeddings + BM25 lexical scoring), injects them into a grounded prompt, and streams an answer from an LLM — with citations back to the source file, page, and chunk. All model calls (embeddings + generation) go through [OpenRouter](https://openrouter.ai/), so the provider/model is a one-line config change.
 
 Unlike a generic chatbot, this assistant answers from your uploaded documents and is transparent about how: it shows retrieval scores, matched terms, the exact prompt sent to the model, and a warning when an answer may not be supported by the documents.
 
@@ -18,13 +18,13 @@ Unlike a generic chatbot, this assistant answers from your uploaded documents an
 
 - PDF upload and page-wise text extraction (`pypdf`)
 - Word-window chunking with overlap
-- **Hybrid retrieval**: Gemini embeddings (`text-embedding-004`) for semantic similarity, combined with BM25 lexical scoring, with automatic fallback to BM25-only when embeddings are unavailable
+- **Hybrid retrieval**: embeddings (`openai/text-embedding-3-small` via OpenRouter) for semantic similarity, combined with BM25 lexical scoring, with automatic fallback to BM25-only when embeddings are unavailable
 - Per-document caching keyed by file content hash, so a PDF is parsed and embedded once per session instead of on every question
-- Gemini-powered, **streamed** answer generation (Server-Sent Events)
+- **Streamed** answer generation (Server-Sent Events) using `google/gemini-2.5-flash-lite` via OpenRouter
 - Source-grounded citations with file name, page number, and chunk ID
 - Two answer modes: **Research Mode** (professional, factual) and **Bestie Mode** (casual, fun)
 - Temperature tuned per mode for predictable vs. creative answers
-- **RAG Inspector** UI: query terms, retrieved chunks with similarity scores, matched terms, and the full prompt sent to Gemini
+- **RAG Inspector** UI: query terms, retrieved chunks with similarity scores, matched terms, and the full prompt sent to the model
 - Single-page UI served directly by the backend — no separate frontend build
 
 ## Architecture
@@ -34,11 +34,11 @@ PDF Upload (multipart)
   -> Text Extraction (pypdf)
   -> Chunking (word windows + overlap)
   -> Hybrid Retrieval
-       - Semantic: Gemini text-embedding-004 + cosine similarity
+       - Semantic: openai/text-embedding-3-small (via OpenRouter) + cosine similarity
        - Lexical:  BM25 over tokenized chunks
        - Combined + ranked, with BM25-only fallback
   -> Grounded Prompt Construction
-  -> Gemini (streamed) -> Answer + Citations
+  -> LLM via OpenRouter (streamed) -> Answer + Citations
 ```
 
 Retrieval and ranking logic lives in [`src/retrieval.py`](src/retrieval.py) (pure, dependency-light, unit-tested). The FastAPI app, embedding integration, caching, and UI live in [`src/app.py`](src/app.py).
@@ -52,8 +52,8 @@ venv/Scripts/activate        # Windows
 
 pip install -r requirements.txt
 
-# set your Gemini key (or put it in a .env file as GEMINI_API_KEY=...)
-export GEMINI_API_KEY=your_key_here
+# set your OpenRouter key (or put it in a .env file as OPENROUTER_API_KEY=sk-or-...)
+export OPENROUTER_API_KEY=sk-or-your_key_here
 
 uvicorn src.app:app --reload
 ```
@@ -64,9 +64,13 @@ Then open http://127.0.0.1:8000.
 
 | Variable | Required | Description |
 | --- | --- | --- |
-| `GEMINI_API_KEY` | yes | Google Gemini API key used for embeddings and answer generation |
+| `OPENROUTER_API_KEY` | yes | [OpenRouter](https://openrouter.ai/keys) API key used for embeddings and answer generation |
+| `OPENROUTER_MODEL` | no | Generation model (default `google/gemini-2.5-flash-lite`) |
+| `OPENROUTER_EMBEDDING_MODEL` | no | Embedding model (default `openai/text-embedding-3-small`) |
 | `ALLOWED_ORIGINS` | no | Comma-separated list of allowed CORS origins (defaults to `*`) |
 | `MAX_UPLOAD_MB` | no | Per-file upload size limit in MB (default `15`) |
+
+> **Cost note:** with the default models, embedding a document costs a fraction of a cent (and is cached), and each answer is well under a cent — a $1 OpenRouter budget covers thousands of questions. If embeddings ever fail, retrieval automatically falls back to BM25-only so the app keeps working.
 
 ## Testing
 
