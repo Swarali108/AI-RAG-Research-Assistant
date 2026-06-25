@@ -29,6 +29,32 @@ Unlike a generic chatbot, this assistant answers from your uploaded documents an
 - **RAG Inspector** UI: query terms, retrieved chunks with similarity scores, matched terms, confidence, request metrics, and the full prompt sent to the model
 - Single-page UI served directly by the backend — no separate frontend build
 
+## Production-grade capabilities
+
+This project also demonstrates the wider AI-engineering stack — RAG, agents, evaluation, memory, and LLMOps:
+
+| Capability | What it does | Where |
+| --- | --- | --- |
+| **Feature-based reranking** | Re-scores a wide hybrid candidate pool on exact-phrase, term-coverage, heading, and proximity signals (no LLM) | [`src/reranker.py`](src/reranker.py) |
+| **Evaluation harness** | Hit Rate / MRR / Recall@K / Precision@K (free) + opt-in LLM-judge Faithfulness & Answer Relevance | [`src/evaluation.py`](src/evaluation.py), `GET /api/eval` |
+| **Agentic query router** | Routes each question to Document RAG, free DuckDuckGo Web Search, or Conversation Memory | [`src/router.py`](src/router.py) |
+| **Multi-format ingestion** | PDF · DOCX · TXT · Markdown · images (OCR) · web-page URLs · YouTube transcripts | [`src/ingestion.py`](src/ingestion.py) |
+| **Conversation memory** | Sends recent turns; compresses long histories to a summary past a threshold to cut tokens | [`src/memory.py`](src/memory.py) |
+| **Persistence & auth** | Supabase profiles, saved documents/chats, pgvector embeddings, persisted metrics — graceful no-op until configured | [`src/storage.py`](src/storage.py), [`supabase/schema.sql`](supabase/schema.sql) |
+| **Observability** | Per-request latency, tokens, est. cost, fallback/route | `GET /api/metrics` |
+
+> **Budget posture:** routing, reranking, confidence, follow-ups, and retrieval-metric evaluation add **zero** per-request LLM cost. The only paid LLM calls are embeddings + answer generation (and, opt-in, history compression and judge-based eval). See [docs/SUPABASE_SETUP.md](docs/SUPABASE_SETUP.md) to enable persistence.
+
+### Key API endpoints
+
+| Endpoint | Purpose |
+| --- | --- |
+| `POST /api/research/stream` | Streamed answer (SSE) — accepts files, `url`, `youtube_url`, `use_web`, `history` |
+| `POST /api/research` | Non-streamed answer with full trace |
+| `GET /api/eval?k=4&judge=false` | Run the bundled evaluation set |
+| `GET /api/metrics` | Session observability counters |
+| `GET /api/account/status` · `/api/workspace/{documents,chats}` | Persistent workspaces (Supabase) |
+
 ## Architecture
 
 ```text
@@ -73,6 +99,7 @@ Then open http://127.0.0.1:8000.
 | `MAX_EMBED_CHUNKS` | no | Skip semantic embeddings above this many chunks; use free BM25 instead (default `250`) |
 | `ALLOWED_ORIGINS` | no | Comma-separated list of allowed CORS origins (defaults to `*`) |
 | `MAX_UPLOAD_MB` | no | Per-file upload size limit in MB (default `15`) |
+| `SUPABASE_URL` / `SUPABASE_KEY` | no | Enable persistent workspaces, pgvector, and persisted metrics (see [docs/SUPABASE_SETUP.md](docs/SUPABASE_SETUP.md)) |
 
 > **Cost note:** with the default models, embedding a document costs a fraction of a cent (and is cached), and each answer is well under a cent — a $1 OpenRouter budget covers thousands of questions. If embeddings ever fail, retrieval automatically falls back to BM25-only so the app keeps working.
 
