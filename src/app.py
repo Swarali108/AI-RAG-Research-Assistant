@@ -58,6 +58,13 @@ OPENROUTER_HEADERS = {
     "X-Title": os.getenv("OPENROUTER_SITE_NAME", "AI RAG Research Assistant"),
 }
 
+# --- Cost guardrails (keep a small budget lasting) ---
+# Cap answer length so a runaway response can't burn output tokens.
+GENERATION_MAX_TOKENS = int(os.getenv("OPENROUTER_MAX_OUTPUT_TOKENS", "800"))
+# Skip semantic embeddings for very large documents (fall back to free BM25),
+# so a huge PDF can't rack up embedding costs on every question.
+MAX_EMBED_CHUNKS = int(os.getenv("MAX_EMBED_CHUNKS", "250"))
+
 # Cache parsed chunks + their embeddings keyed by a hash of the uploaded bytes,
 # so the same document is not re-parsed and re-embedded on every question.
 _DOCUMENT_CACHE: Dict[str, Dict[str, Any]] = {}
@@ -187,9 +194,15 @@ def build_document_index(files_payload: List[Dict[str, Any]]) -> Dict[str, Any]:
         )
 
     chunks = chunk_pages(pages)
-    chunk_embeddings = embed_texts(
-        [chunk["text"] for chunk in chunks], task_type="RETRIEVAL_DOCUMENT"
-    )
+
+    # Cost guard: only embed documents up to MAX_EMBED_CHUNKS; larger ones use
+    # BM25-only retrieval (free) instead of paying to embed hundreds of chunks.
+    if len(chunks) <= MAX_EMBED_CHUNKS:
+        chunk_embeddings = embed_texts(
+            [chunk["text"] for chunk in chunks], task_type="RETRIEVAL_DOCUMENT"
+        )
+    else:
+        chunk_embeddings = None
 
     index = {
         "pages": len(pages),
@@ -341,6 +354,7 @@ def generate_answer(prompt: str, temperature: float = 0.2):
         model=GENERATION_MODEL,
         messages=[{"role": "user", "content": prompt}],
         temperature=temperature,
+        max_tokens=GENERATION_MAX_TOKENS,
     )
     return response.choices[0].message.content or "I could not generate an answer."
 
@@ -351,6 +365,7 @@ def stream_answer(prompt: str, temperature: float = 0.2):
         model=GENERATION_MODEL,
         messages=[{"role": "user", "content": prompt}],
         temperature=temperature,
+        max_tokens=GENERATION_MAX_TOKENS,
         stream=True,
     )
 

@@ -67,6 +67,8 @@ Then open http://127.0.0.1:8000.
 | `OPENROUTER_API_KEY` | yes | [OpenRouter](https://openrouter.ai/keys) API key used for embeddings and answer generation |
 | `OPENROUTER_MODEL` | no | Generation model (default `google/gemini-2.5-flash-lite`) |
 | `OPENROUTER_EMBEDDING_MODEL` | no | Embedding model (default `openai/text-embedding-3-small`) |
+| `OPENROUTER_MAX_OUTPUT_TOKENS` | no | Cap on answer length to control output cost (default `800`) |
+| `MAX_EMBED_CHUNKS` | no | Skip semantic embeddings above this many chunks; use free BM25 instead (default `250`) |
 | `ALLOWED_ORIGINS` | no | Comma-separated list of allowed CORS origins (defaults to `*`) |
 | `MAX_UPLOAD_MB` | no | Per-file upload size limit in MB (default `15`) |
 
