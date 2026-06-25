@@ -4,7 +4,6 @@ import os
 import re
 import time
 from collections import Counter
-from io import BytesIO
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -14,7 +13,6 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse, StreamingResponse
 from openai import OpenAI
 from pydantic import BaseModel
-from pypdf import PdfReader
 
 try:
     from src.retrieval import hybrid_rank, tokenize
@@ -34,6 +32,23 @@ except ImportError:  # when the app dir itself is on sys.path (some deploy setup
         judge_faithfulness,
         query_retrieval_metrics,
     )
+
+try:
+    from src.ingestion import (
+        SUPPORTED_UPLOAD_EXTENSIONS,
+        extract_pages,
+        extract_url,
+        extract_youtube,
+    )
+    from src.router import route_question, web_search
+except ImportError:
+    from ingestion import (
+        SUPPORTED_UPLOAD_EXTENSIONS,
+        extract_pages,
+        extract_url,
+        extract_youtube,
+    )
+    from router import route_question, web_search
 
 
 load_dotenv()
@@ -264,26 +279,8 @@ def embed_texts(texts: List[str], task_type: Optional[str] = None) -> Optional[L
 
 
 def load_pdf_pages(file_bytes: bytes, source_name: str) -> List[Dict[str, Any]]:
-    reader = PdfReader(BytesIO(file_bytes))
-    pages = []
-
-    for page_number, page in enumerate(reader.pages, start=1):
-        raw = page.extract_text() or ""
-        # Keep line structure (collapse only intra-line whitespace) so that
-        # heading-aware chunking can detect section boundaries.
-        lines = [" ".join(line.split()) for line in raw.splitlines()]
-        text = "\n".join(line for line in lines if line)
-
-        if text.strip():
-            pages.append(
-                {
-                    "source": source_name,
-                    "page": page_number,
-                    "text": text,
-                }
-            )
-
-    return pages
+    """Backward-compatible PDF loader; delegates to the multi-format ingester."""
+    return extract_pages(source_name, file_bytes)
 
 
 _HEADING_RE = re.compile(r"^(#{1,6}\s+\S|\d+(\.\d+)*[.)]\s+\S)")
@@ -370,27 +367,38 @@ def chunk_pages(pages: List[Dict[str, Any]], chunk_words: int = 220, overlap: in
     return chunks
 
 
-def _document_signature(files_payload: List[Dict[str, Any]]) -> str:
-    """Stable hash of the uploaded file bytes used as the cache key."""
+def _document_signature(sources: List[Dict[str, Any]]) -> str:
+    """Stable cache key over the input sources (file bytes, or pre-extracted
+    pages for URLs/YouTube)."""
     hasher = hashlib.sha256()
-    for payload in sorted(files_payload, key=lambda item: item["filename"]):
-        hasher.update(payload["filename"].encode("utf-8"))
-        hasher.update(b"\0")
-        hasher.update(payload["bytes"])
+    for source in sorted(sources, key=lambda item: item.get("filename") or item.get("key", "")):
+        if "bytes" in source:
+            hasher.update((source.get("filename") or "").encode("utf-8"))
+            hasher.update(b"\0")
+            hasher.update(source["bytes"])
+        else:
+            hasher.update((source.get("key") or "").encode("utf-8"))
+            hasher.update(b"\0")
+            for page in source.get("pages", []):
+                hasher.update(page["text"].encode("utf-8", errors="ignore"))
     return hasher.hexdigest()
 
 
-def build_document_index(files_payload: List[Dict[str, Any]]) -> Dict[str, Any]:
-    """Parse, chunk, and embed the uploaded PDFs once, caching the result by
-    content hash. Returns chunks, their embeddings (or None), and page count."""
-    signature = _document_signature(files_payload)
+def build_document_index(sources: List[Dict[str, Any]]) -> Dict[str, Any]:
+    """Parse, chunk, and embed the input sources once, caching by content hash.
+    Each source is either an uploaded file ({"filename","bytes"}) or a set of
+    pre-extracted pages ({"key","pages"}) from a URL or YouTube transcript."""
+    signature = _document_signature(sources)
     cached = _DOCUMENT_CACHE.get(signature)
     if cached is not None:
         return cached
 
     pages = []
-    for payload in files_payload:
-        pages.extend(load_pdf_pages(payload["bytes"], payload["filename"]))
+    for source in sources:
+        if "bytes" in source:
+            pages.extend(extract_pages(source["filename"], source["bytes"]))
+        else:
+            pages.extend(source.get("pages", []))
 
     if not pages:
         raise HTTPException(
@@ -451,7 +459,13 @@ def retrieve_chunks(
     return rerank(question, candidates, top_k=top_k)
 
 
-def build_rag_prompt(question: str, retrieved_chunks: List[Dict[str, Any]], answer_mode: str):
+def build_rag_prompt(
+    question: str,
+    retrieved_chunks: List[Dict[str, Any]],
+    answer_mode: str,
+    web_results: Optional[List[Dict[str, str]]] = None,
+    history_summary: str = "",
+):
     context_parts = []
 
     for index, chunk in enumerate(retrieved_chunks, start=1):
@@ -470,6 +484,25 @@ Content:
 
     context = "\n".join(context_parts)
 
+    web_context = ""
+    if web_results:
+        web_context = "\n".join(
+            f"""
+Web Source {index}
+Title: {result.get("title", "Untitled")}
+URL: {result.get("url", "")}
+Snippet:
+{result.get("snippet", "")}
+"""
+            for index, result in enumerate(web_results, start=1)
+        )
+
+    history_block = (
+        f"\nConversation summary (for resolving references only):\n{history_summary}\n"
+        if history_summary
+        else ""
+    )
+
     mode = MODES[resolve_mode(answer_mode)]
     tone_rule = mode["tone"]
 
@@ -478,16 +511,20 @@ You are an AI RAG Research Assistant.
 
 {tone_rule}
 
-RAG Rules:
+Source Rules:
 - Answer using the injected document context first.
-- Include citations when using document information.
-- Cite as [File name, Page X].
+- Use the external web context only when it is provided and relevant.
+- Use the conversation summary only to understand references, not as a fact source.
+- Cite documents as [File name, Page X] and web results as [Web Source X].
 - Do not invent facts or sources.
-- If the answer is not supported by the document context, say that clearly.
+- If the answer is not supported by the available context, say that clearly.
 - Keep the answer structured and easy to scan.
-
+{history_block}
 Injected Document Context:
 {context}
+
+External Web Context:
+{web_context or "None"}
 
 User Question:
 {question}
@@ -549,14 +586,27 @@ def compute_confidence(
     }
 
 
-def prepare_rag_trace(question: str, answer_mode: str, files_payload: List[Dict[str, Any]]):
+def prepare_rag_trace(
+    question: str,
+    answer_mode: str,
+    files_payload: List[Dict[str, Any]],
+    use_web: bool = False,
+    history_summary: str = "",
+    has_history: bool = False,
+):
     index = build_document_index(files_payload)
     chunks = index["chunks"]
+
+    route = route_question(question, has_history=has_history, use_web=use_web)
+    web_results = web_search(question) if route == "web" else []
 
     retrieved_chunks = retrieve_chunks(
         question, chunks, chunk_embeddings=index["chunk_embeddings"], top_k=4
     )
-    prompt = build_rag_prompt(question, retrieved_chunks, answer_mode)
+    prompt = build_rag_prompt(
+        question, retrieved_chunks, answer_mode,
+        web_results=web_results, history_summary=history_summary,
+    )
 
     citations = [
         {
@@ -579,10 +629,14 @@ def prepare_rag_trace(question: str, answer_mode: str, files_payload: List[Dict[
     )
     confidence = compute_confidence(retrieved_chunks, question, used_semantic)
 
+    route_labels = {"rag": "Document RAG", "web": "Web Search", "memory": "Conversation Memory"}
+
     return {
         "question": question,
         "answer_mode": answer_mode,
         "mode": MODES[resolve_mode(answer_mode)]["label"],
+        "route": route_labels.get(route, "Document RAG"),
+        "web_results": web_results,
         "pages_processed": index["pages"],
         "chunks_processed": len(chunks),
         "retrieved_chunks": citations,
@@ -1295,6 +1349,9 @@ def home():
 
           <div class="composer">
             <textarea id="question" placeholder="Ask a follow-up question..."></textarea>
+            <label style="display:flex;align-items:center;gap:8px;font-size:0.82rem;color:var(--muted);margin:4px 0 10px;cursor:pointer;">
+              <input type="checkbox" id="webToggle" /> 🌐 Search the web for current info (free DuckDuckGo)
+            </label>
             <div class="composer-actions">
               <div class="mode-toggle">
                 <button class="mode-button active" data-mode="Research Mode">🔬 Research<br><small>Professional</small></button>
@@ -1338,9 +1395,12 @@ def home():
 
     <aside class="rightbar">
       <div class="doc-card">
-        <label for="files"><strong id="docTitle">Upload research PDFs</strong></label>
-        <input class="file-input" id="files" type="file" accept="application/pdf" multiple />
-        <div class="muted" id="fileStatus">No document uploaded yet.</div>
+        <label for="files"><strong id="docTitle">Add knowledge sources</strong></label>
+        <input class="file-input" id="files" type="file" accept=".pdf,.docx,.txt,.md,.markdown,.png,.jpg,.jpeg,.webp,.bmp,.tiff" multiple />
+        <div class="muted" style="margin-top:8px;font-size:0.78rem;">PDF · DOCX · TXT · Markdown · images (OCR)</div>
+        <input id="urlInput" class="profile-field" style="width:100%;margin-top:10px;padding:10px;border-radius:8px;border:1px solid var(--line);background:rgba(5,7,19,0.72);color:var(--text);" type="url" placeholder="…or paste a web page URL" />
+        <input id="youtubeInput" class="profile-field" style="width:100%;margin-top:8px;padding:10px;border-radius:8px;border:1px solid var(--line);background:rgba(5,7,19,0.72);color:var(--text);" type="url" placeholder="…or a YouTube link (transcript)" />
+        <div class="muted" id="fileStatus" style="margin-top:8px;">No source added yet.</div>
         <div class="progress"></div>
       </div>
 
@@ -1546,10 +1606,12 @@ def home():
 
     async function askQuestion() {
       const files = Array.from(filesInput.files || []);
+      const urlValue = (document.getElementById("urlInput").value || "").trim();
+      const youtubeValue = (document.getElementById("youtubeInput").value || "").trim();
       const question = questionInput.value.trim();
 
-      if (!files.length) {
-        renderError("Please upload at least one PDF first.");
+      if (!files.length && !urlValue && !youtubeValue) {
+        renderError("Add a source first: upload a file, paste a URL, or add a YouTube link.");
         return;
       }
 
@@ -1576,8 +1638,11 @@ def home():
 
       const formData = new FormData();
       files.forEach(file => formData.append("files", file));
+      if (urlValue) formData.append("url", urlValue);
+      if (youtubeValue) formData.append("youtube_url", youtubeValue);
       formData.append("question", question);
       formData.append("answer_mode", currentMode);
+      formData.append("use_web", document.getElementById("webToggle").checked ? "true" : "false");
 
       try {
         const response = await fetch("/api/research/stream", {
@@ -1868,6 +1933,9 @@ def home():
       const chip = document.createElement("div");
       chip.className = "conf-chip conf-" + label;
       chip.textContent = "🎯 Confidence: " + pct + "% · " + label;
+      if (trace.route) {
+        chip.textContent += "  ·  🧭 " + trace.route;
+      }
       bubble.insertBefore(chip, answerNode);
 
       if (conf.warning) {
@@ -1878,18 +1946,25 @@ def home():
       }
 
       const chunks = trace.retrieved_chunks || [];
-      if (chunks.length) {
+      const web = trace.web_results || [];
+      if (chunks.length || web.length) {
         const details = document.createElement("details");
         details.className = "sources";
+        const docHtml = chunks.map((c, i) =>
+          '<div class="source-item"><strong>[' + (i + 1) + '] ' + escapeHtml(c.source) +
+          ' · Page ' + c.page + '</strong> <span class="muted">· score ' +
+          Number(c.score).toFixed(3) + (c.section ? ' · ' + escapeHtml(c.section) : '') +
+          '</span><div class="source-text">' +
+          highlightTerms(c.preview || "", c.matched_terms) + '</div></div>'
+        ).join("");
+        const webHtml = web.map((w, i) =>
+          '<div class="source-item"><strong>🌐 [Web Source ' + (i + 1) + '] ' + escapeHtml(w.title || "") +
+          '</strong>' + (w.url ? ' <a href="' + escapeHtml(w.url) + '" target="_blank" rel="noopener" class="muted">link</a>' : '') +
+          '<div class="source-text">' + escapeHtml(w.snippet || "") + '</div></div>'
+        ).join("");
         details.innerHTML =
-          "<summary>📚 Sources (" + chunks.length + ") — exact text used for this answer</summary>" +
-          chunks.map((c, i) =>
-            '<div class="source-item"><strong>[' + (i + 1) + '] ' + escapeHtml(c.source) +
-            ' · Page ' + c.page + '</strong> <span class="muted">· score ' +
-            Number(c.score).toFixed(3) + (c.section ? ' · ' + escapeHtml(c.section) : '') +
-            '</span><div class="source-text">' +
-            highlightTerms(c.preview || "", c.matched_terms) + '</div></div>'
-          ).join("");
+          "<summary>📚 Sources (" + (chunks.length + web.length) + ") — exact text used for this answer</summary>" +
+          docHtml + webHtml;
         bubble.appendChild(details);
       }
     }
@@ -1975,39 +2050,60 @@ def chat(request: ChatRequest):
     )
 
 
-async def read_uploads(files: List[UploadFile]):
-    if not files:
-        raise HTTPException(status_code=400, detail="Please upload at least one PDF.")
+async def gather_sources(
+    files: Optional[List[UploadFile]] = None,
+    url: Optional[str] = None,
+    youtube_url: Optional[str] = None,
+):
+    """Collect knowledge sources from uploaded files (PDF/DOCX/TXT/MD/images),
+    a web page URL, and/or a YouTube link (#8). Returns a list of source dicts
+    that build_document_index() understands."""
+    sources: List[Dict[str, Any]] = []
 
-    payload = []
-
-    for upload in files:
-        if not upload.filename.lower().endswith(".pdf"):
-            raise HTTPException(status_code=400, detail=f"{upload.filename} is not a PDF.")
-
+    for upload in files or []:
+        if not upload.filename:
+            continue
+        if not upload.filename.lower().endswith(SUPPORTED_UPLOAD_EXTENSIONS):
+            raise HTTPException(
+                status_code=400,
+                detail=f"{upload.filename}: unsupported type. Supported: {', '.join(SUPPORTED_UPLOAD_EXTENSIONS)}",
+            )
         data = await upload.read()
-
         if len(data) > MAX_UPLOAD_BYTES:
             raise HTTPException(
                 status_code=413,
                 detail=f"{upload.filename} exceeds the {MAX_UPLOAD_MB:.0f} MB upload limit.",
             )
+        sources.append({"filename": upload.filename, "bytes": data})
 
-        payload.append(
-            {
-                "filename": upload.filename,
-                "bytes": data,
-            }
+    if url and url.strip():
+        try:
+            sources.append({"key": url.strip(), "pages": extract_url(url.strip())})
+        except Exception as error:
+            raise HTTPException(status_code=400, detail=f"Could not read URL: {error}") from error
+
+    if youtube_url and youtube_url.strip():
+        try:
+            sources.append({"key": youtube_url.strip(), "pages": extract_youtube(youtube_url.strip())})
+        except Exception as error:
+            raise HTTPException(status_code=400, detail=f"Could not read YouTube transcript: {error}") from error
+
+    if not sources:
+        raise HTTPException(
+            status_code=400, detail="Please upload a document or provide a URL / YouTube link."
         )
 
-    return payload
+    return sources
 
 
 @app.post("/api/research")
 async def research(
     question: str = Form(...),
     answer_mode: str = Form("Research Mode"),
-    files: List[UploadFile] = File(...),
+    files: Optional[List[UploadFile]] = File(None),
+    url: Optional[str] = Form(None),
+    youtube_url: Optional[str] = Form(None),
+    use_web: bool = Form(False),
 ):
     clean_question = question.strip()
 
@@ -2016,7 +2112,8 @@ async def research(
 
     started = time.perf_counter()
     embedding_before = METRICS["embedding_tokens"]
-    trace = prepare_rag_trace(clean_question, answer_mode, await read_uploads(files))
+    sources = await gather_sources(files, url, youtube_url)
+    trace = prepare_rag_trace(clean_question, answer_mode, sources, use_web=use_web)
     embedding_used = METRICS["embedding_tokens"] - embedding_before
 
     mode = MODES[resolve_mode(answer_mode)]
@@ -2051,7 +2148,10 @@ async def research(
 async def research_stream(
     question: str = Form(...),
     answer_mode: str = Form("Research Mode"),
-    files: List[UploadFile] = File(...),
+    files: Optional[List[UploadFile]] = File(None),
+    url: Optional[str] = Form(None),
+    youtube_url: Optional[str] = Form(None),
+    use_web: bool = Form(False),
 ):
     clean_question = question.strip()
 
@@ -2060,7 +2160,8 @@ async def research_stream(
 
     started = time.perf_counter()
     embedding_before = METRICS["embedding_tokens"]
-    trace = prepare_rag_trace(clean_question, answer_mode, await read_uploads(files))
+    sources = await gather_sources(files, url, youtube_url)
+    trace = prepare_rag_trace(clean_question, answer_mode, sources, use_web=use_web)
     embedding_used = METRICS["embedding_tokens"] - embedding_before
 
     mode = MODES[resolve_mode(answer_mode)]

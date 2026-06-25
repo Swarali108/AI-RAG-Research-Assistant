@@ -5,3 +5,11 @@ pydantic>=2.0,<3.0
 pypdf>=5.0
 python-dotenv>=1.0
 python-multipart>=0.0.9
+
+# Multi-format ingestion (#8) + web search (#6).
+# OCR also needs the system Tesseract binary; it degrades gracefully if absent.
+python-docx>=1.1
+ddgs>=6.0
+youtube-transcript-api>=0.6
+pillow>=10.0
+pytesseract>=0.3.10
