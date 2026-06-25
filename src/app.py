@@ -8,7 +8,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from dotenv import load_dotenv
-from fastapi import FastAPI, File, Form, HTTPException, UploadFile
+from fastapi import Depends, FastAPI, File, Form, Header, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse, StreamingResponse
 from openai import OpenAI
@@ -41,6 +41,7 @@ try:
         extract_youtube,
     )
     from src.router import route_question, web_search
+    from src.memory import format_history, has_history, prepare_history
 except ImportError:
     from ingestion import (
         SUPPORTED_UPLOAD_EXTENSIONS,
@@ -49,6 +50,12 @@ except ImportError:
         extract_youtube,
     )
     from router import route_question, web_search
+    from memory import format_history, has_history, prepare_history
+
+try:
+    from src.storage import store
+except ImportError:
+    from storage import store
 
 
 load_dotenv()
@@ -242,6 +249,19 @@ class ChatRequest(BaseModel):
 class ChatResponse(BaseModel):
     answer: str
     follow_up_questions: List[str] = []
+
+
+class ChatSave(BaseModel):
+    title: str = "Untitled chat"
+    turns: List[Dict[str, Any]] = []
+
+
+def get_optional_user(authorization: Optional[str] = Header(None)):
+    """Resolve the Supabase access token (if any) to a user; None when anonymous
+    or when persistence is not configured."""
+    if not authorization or not authorization.lower().startswith("bearer "):
+        return None
+    return store.user_from_token(authorization.split(" ", 1)[1].strip())
 
 
 def get_openrouter_client():
@@ -755,6 +775,47 @@ def build_request_metrics(
         "session_fallback_rate": round(METRICS["fallback_requests"] / requests, 3),
         "session_total_cost_usd": round(METRICS["total_cost_usd"], 6),
     }
+
+
+def _persist_metrics(metrics: Dict[str, Any], route: Optional[str], user_id: Optional[str] = None):
+    """Best-effort persisted observability (#10). No-op unless Supabase is configured."""
+    store.log_metrics(
+        {
+            "user_id": user_id,
+            "latency_ms": metrics.get("latency_ms"),
+            "prompt_tokens": metrics.get("prompt_tokens"),
+            "completion_tokens": metrics.get("completion_tokens"),
+            "embedding_tokens": metrics.get("embedding_tokens"),
+            "request_cost_usd": metrics.get("request_cost_usd"),
+            "retrieval_mode": metrics.get("retrieval_mode"),
+            "route": route,
+        }
+    )
+
+
+def build_history_context(history_json: Optional[str]):
+    """Parse the client's chat history, compress it if long (#5), and return a
+    (context_string, has_history) pair for prompt injection. Budget-safe: the
+    summarizer only runs for long conversations."""
+    if not history_json:
+        return "", False
+    try:
+        turns = json.loads(history_json)
+        if not isinstance(turns, list):
+            return "", False
+    except (json.JSONDecodeError, TypeError):
+        return "", False
+
+    summarizer = lambda text: generate_answer(text, temperature=0.1, max_tokens=200)
+    prepared = prepare_history(turns, summarizer_fn=summarizer)
+
+    parts = []
+    if prepared["summary"]:
+        parts.append("Summary of earlier conversation:\n" + prepared["summary"])
+    if prepared["recent"]:
+        parts.append("Recent turns:\n" + format_history(prepared["recent"]))
+
+    return "\n\n".join(parts), has_history(turns)
 
 
 def serialize_event(event: str, data: Dict[str, Any]):
@@ -1464,6 +1525,7 @@ def home():
     let activeAnswerNode = null;
     let pendingFinalAnswer = null;
     let chatHistory = [];
+    let conversationTurns = [];
 
     const savedName = localStorage.getItem("ragUserName") || "";
     userNameInput.value = savedName;
@@ -1571,6 +1633,7 @@ def home():
 
     document.getElementById("newChat").addEventListener("click", () => {
       messages.innerHTML = '<div class="empty-state">Fresh chat ready. Upload a PDF and ask away.</div>';
+      conversationTurns = [];
       questionInput.value = "";
       latestAnswer = "";
       updateInspector(null);
@@ -1643,6 +1706,8 @@ def home():
       formData.append("question", question);
       formData.append("answer_mode", currentMode);
       formData.append("use_web", document.getElementById("webToggle").checked ? "true" : "false");
+      formData.append("history", JSON.stringify(conversationTurns.slice(-10)));
+      conversationTurns.push({ role: "user", content: question });
 
       try {
         const response = await fetch("/api/research/stream", {
@@ -1716,6 +1781,7 @@ def home():
         renderMetrics(answerNode, payload.metrics);
         renderFollowUps(payload.follow_up_questions);
         showInspectorMetrics(payload.metrics);
+        conversationTurns.push({ role: "assistant", content: payload.answer || latestAnswer });
       }
 
       if (eventName === "error") {
@@ -2104,6 +2170,7 @@ async def research(
     url: Optional[str] = Form(None),
     youtube_url: Optional[str] = Form(None),
     use_web: bool = Form(False),
+    history: Optional[str] = Form(None),
 ):
     clean_question = question.strip()
 
@@ -2113,7 +2180,11 @@ async def research(
     started = time.perf_counter()
     embedding_before = METRICS["embedding_tokens"]
     sources = await gather_sources(files, url, youtube_url)
-    trace = prepare_rag_trace(clean_question, answer_mode, sources, use_web=use_web)
+    history_summary, had_history = build_history_context(history)
+    trace = prepare_rag_trace(
+        clean_question, answer_mode, sources,
+        use_web=use_web, history_summary=history_summary, has_history=had_history,
+    )
     embedding_used = METRICS["embedding_tokens"] - embedding_before
 
     mode = MODES[resolve_mode(answer_mode)]
@@ -2135,6 +2206,7 @@ async def research(
         completion_tokens=METRICS["generation_completion_tokens"] - completion_before,
         semantic_active=trace["embedding_summary"]["semantic_active"],
     )
+    _persist_metrics(metrics, trace.get("route"))
 
     return {
         **trace,
@@ -2152,6 +2224,7 @@ async def research_stream(
     url: Optional[str] = Form(None),
     youtube_url: Optional[str] = Form(None),
     use_web: bool = Form(False),
+    history: Optional[str] = Form(None),
 ):
     clean_question = question.strip()
 
@@ -2161,7 +2234,11 @@ async def research_stream(
     started = time.perf_counter()
     embedding_before = METRICS["embedding_tokens"]
     sources = await gather_sources(files, url, youtube_url)
-    trace = prepare_rag_trace(clean_question, answer_mode, sources, use_web=use_web)
+    history_summary, had_history = build_history_context(history)
+    trace = prepare_rag_trace(
+        clean_question, answer_mode, sources,
+        use_web=use_web, history_summary=history_summary, has_history=had_history,
+    )
     embedding_used = METRICS["embedding_tokens"] - embedding_before
 
     mode = MODES[resolve_mode(answer_mode)]
@@ -2191,6 +2268,7 @@ async def research_stream(
                 completion_tokens=usage_sink["completion_tokens"],
                 semantic_active=semantic_active,
             )
+            _persist_metrics(metrics, trace.get("route"))
             yield serialize_event(
                 "done",
                 {
@@ -2216,6 +2294,40 @@ def metrics_snapshot():
         "generation_model": GENERATION_MODEL,
         "embedding_model": EMBEDDING_MODEL,
     }
+
+
+@app.get("/api/account/status")
+def account_status(user=Depends(get_optional_user)):
+    """Whether persistent workspaces are configured, and who is signed in (#9)."""
+    return {"persistence_enabled": store.enabled, "authenticated": bool(user), "user": user}
+
+
+@app.get("/api/workspace/documents")
+def workspace_documents(user=Depends(get_optional_user)):
+    if not store.enabled:
+        return {"persistence_enabled": False, "documents": []}
+    if not user:
+        raise HTTPException(status_code=401, detail="Sign in to view your saved documents.")
+    return {"persistence_enabled": True, "documents": store.list_documents(user["id"])}
+
+
+@app.get("/api/workspace/chats")
+def workspace_chats(user=Depends(get_optional_user)):
+    if not store.enabled:
+        return {"persistence_enabled": False, "chats": []}
+    if not user:
+        raise HTTPException(status_code=401, detail="Sign in to view your saved chats.")
+    return {"persistence_enabled": True, "chats": store.list_chats(user["id"])}
+
+
+@app.post("/api/workspace/chats")
+def save_workspace_chat(payload: ChatSave, user=Depends(get_optional_user)):
+    if not store.enabled:
+        raise HTTPException(status_code=503, detail="Persistence is not configured.")
+    if not user:
+        raise HTTPException(status_code=401, detail="Sign in to save chats.")
+    saved = store.save_chat(user["id"], payload.title, payload.turns)
+    return {"saved": saved}
 
 
 def _judge(prompt: str) -> str:
