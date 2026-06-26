@@ -1363,6 +1363,24 @@ def home():
       border-radius: 6px;
     }
     .file-remove:hover { background: rgba(251, 113, 133, 0.16); }
+    .file-clear-row {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      margin-top: 8px;
+      font-size: 0.78rem;
+      color: var(--muted);
+    }
+    .file-clear {
+      border: 1px solid rgba(251, 113, 133, 0.34);
+      background: rgba(251, 113, 133, 0.1);
+      color: var(--danger);
+      cursor: pointer;
+      font-size: 0.76rem;
+      padding: 3px 9px;
+      border-radius: 999px;
+    }
+    .file-clear:hover { background: rgba(251, 113, 133, 0.2); }
     @media (max-width: 1180px) {
       .app-shell { grid-template-columns: 280px minmax(0, 1fr); }
       .rightbar { display: none; }
@@ -1690,7 +1708,12 @@ def home():
 
       docTitle.textContent = selectedFiles.length === 1 ? selectedFiles[0].name : `${selectedFiles.length} files`;
 
-      fileStatus.innerHTML = selectedFiles.map((file, index) =>
+      const clearAll = selectedFiles.length > 1
+        ? '<div class="file-clear-row"><span>' + selectedFiles.length + ' files</span>' +
+          '<button type="button" id="clearAllFiles" class="file-clear">✕ Clear all</button></div>'
+        : "";
+
+      fileStatus.innerHTML = clearAll + selectedFiles.map((file, index) =>
         '<div class="file-row">' +
         '<span class="file-name" title="' + escapeHtml(file.name) + '">📄 ' + escapeHtml(file.name) + '</span>' +
         '<button type="button" class="file-remove" data-index="' + index + '" title="Remove">✕</button>' +
@@ -1703,6 +1726,14 @@ def home():
           renderSelectedFiles();
         });
       });
+
+      const clearAllButton = document.getElementById("clearAllFiles");
+      if (clearAllButton) {
+        clearAllButton.addEventListener("click", () => {
+          selectedFiles = [];
+          renderSelectedFiles();
+        });
+      }
 
       libraryList.innerHTML = selectedFiles.map(file =>
         '<button class="library-item" type="button">📄 <span>' + escapeHtml(file.name) + '</span></button>'
