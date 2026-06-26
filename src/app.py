@@ -1333,6 +1333,36 @@ def home():
     }
     .followups-wrap { margin-top: 12px; }
     .followups-wrap .section-label { margin: 0 0 8px; }
+    .file-row {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 8px;
+      padding: 7px 10px;
+      margin-top: 6px;
+      border: 1px solid var(--line);
+      border-radius: 6px;
+      background: rgba(8, 12, 28, 0.6);
+    }
+    .file-name {
+      font-size: 0.82rem;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+      max-width: 200px;
+    }
+    .file-remove {
+      flex: 0 0 auto;
+      border: 0;
+      background: transparent;
+      color: var(--danger);
+      cursor: pointer;
+      font-size: 0.95rem;
+      line-height: 1;
+      padding: 2px 6px;
+      border-radius: 6px;
+    }
+    .file-remove:hover { background: rgba(251, 113, 133, 0.16); }
     @media (max-width: 1180px) {
       .app-shell { grid-template-columns: 280px minmax(0, 1fr); }
       .rightbar { display: none; }
@@ -1526,6 +1556,7 @@ def home():
     let pendingFinalAnswer = null;
     let chatHistory = [];
     let conversationTurns = [];
+    let selectedFiles = [];
 
     const savedName = localStorage.getItem("ragUserName") || "";
     userNameInput.value = savedName;
@@ -1640,24 +1671,42 @@ def home():
     });
 
     filesInput.addEventListener("change", () => {
-      const files = Array.from(filesInput.files || []);
-      const names = files.map(file => file.name);
-      fileStatus.textContent = files.length ? `${files.length} file(s): ${names.join(", ")}` : "No document uploaded yet.";
-      docTitle.textContent = names[0] || "Upload research PDFs";
-      renderLibrary(names);
+      Array.from(filesInput.files || []).forEach(file => {
+        const isDuplicate = selectedFiles.some(f => f.name === file.name && f.size === file.size);
+        if (!isDuplicate) selectedFiles.push(file);
+      });
+      // Clear so the same file can be re-added later and re-fire change.
+      filesInput.value = "";
+      renderSelectedFiles();
     });
 
-    function renderLibrary(names) {
-      if (!names.length) {
-        libraryList.innerHTML = '<div class="sidebar-empty">Upload PDFs to see them here.</div>';
+    function renderSelectedFiles() {
+      if (!selectedFiles.length) {
+        fileStatus.innerHTML = "No source added yet.";
+        docTitle.textContent = "Add knowledge sources";
+        libraryList.innerHTML = '<div class="sidebar-empty">Upload files to see them here.</div>';
         return;
       }
 
-      libraryList.innerHTML = names.map((name, index) => `
-        <button class="library-item ${index === 0 ? "active" : ""}" type="button">
-          📄 <span>${escapeHtml(name)}</span>
-        </button>
-      `).join("");
+      docTitle.textContent = selectedFiles.length === 1 ? selectedFiles[0].name : `${selectedFiles.length} files`;
+
+      fileStatus.innerHTML = selectedFiles.map((file, index) =>
+        '<div class="file-row">' +
+        '<span class="file-name" title="' + escapeHtml(file.name) + '">📄 ' + escapeHtml(file.name) + '</span>' +
+        '<button type="button" class="file-remove" data-index="' + index + '" title="Remove">✕</button>' +
+        '</div>'
+      ).join("");
+
+      fileStatus.querySelectorAll(".file-remove").forEach(button => {
+        button.addEventListener("click", () => {
+          selectedFiles.splice(Number(button.dataset.index), 1);
+          renderSelectedFiles();
+        });
+      });
+
+      libraryList.innerHTML = selectedFiles.map(file =>
+        '<button class="library-item" type="button">📄 <span>' + escapeHtml(file.name) + '</span></button>'
+      ).join("");
     }
 
     askButton.addEventListener("click", askQuestion);
@@ -1668,7 +1717,7 @@ def home():
     });
 
     async function askQuestion() {
-      const files = Array.from(filesInput.files || []);
+      const files = selectedFiles;
       const urlValue = (document.getElementById("urlInput").value || "").trim();
       const youtubeValue = (document.getElementById("youtubeInput").value || "").trim();
       const question = questionInput.value.trim();

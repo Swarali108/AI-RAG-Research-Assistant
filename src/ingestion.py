@@ -169,8 +169,19 @@ def extract_youtube(url: str) -> List[Dict[str, Any]]:
         ) from exc
 
     video_id = _youtube_id(url)
-    transcript = YouTubeTranscriptApi.get_transcript(video_id)
-    text = _normalize(" ".join(item["text"] for item in transcript))
+
+    # API changed across versions: v1.0+ is instance-based (.fetch), older
+    # versions exposed a static .get_transcript. Support both.
+    api = YouTubeTranscriptApi()
+    if hasattr(api, "fetch"):
+        fetched = api.fetch(video_id)
+        texts = [getattr(snippet, "text", "") for snippet in fetched]
+    elif hasattr(YouTubeTranscriptApi, "get_transcript"):
+        texts = [item["text"] for item in YouTubeTranscriptApi.get_transcript(video_id)]
+    else:
+        raise RuntimeError("Unsupported youtube-transcript-api version.")
+
+    text = _normalize(" ".join(texts))
     if not text.strip():
         raise RuntimeError("Transcript was empty.")
     return [{"source": f"youtube:{video_id}", "page": 1, "text": text}]
