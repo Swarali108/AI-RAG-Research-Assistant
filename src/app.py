@@ -1411,7 +1411,7 @@ def home():
           <div class="composer">
             <textarea id="question" placeholder="Ask a follow-up question..."></textarea>
             <label style="display:flex;align-items:center;gap:8px;font-size:0.82rem;color:var(--muted);margin:4px 0 10px;cursor:pointer;">
-              <input type="checkbox" id="webToggle" /> 🌐 Search the web for current info (free DuckDuckGo)
+              <input type="checkbox" id="webToggle" /> 🌐 Search the web for current info
             </label>
             <div class="composer-actions">
               <div class="mode-toggle">
