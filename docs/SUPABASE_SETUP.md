@@ -6,7 +6,7 @@ observability (#10). Until then, every storage call is a safe no-op.
 
 ## 1. Create the project
 1. Create a project at [supabase.com](https://supabase.com).
-2. In **SQL Editor**, run [`supabase/schema.sql`](../supabase/schema.sql). It
+2. In **SQL Editor**, run [`db/schema.sql`](../db/schema.sql). It
    enables the `vector` extension and creates the `profiles`, `documents`,
    `chats`, `chunk_embeddings`, and `request_metrics` tables, the
    `match_chunks()` similarity function, and row-level-security policies.

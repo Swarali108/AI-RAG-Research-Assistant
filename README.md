@@ -40,7 +40,7 @@ This project also demonstrates the wider AI-engineering stack — RAG, agents, e
 | **Agentic query router** | Routes each question to Document RAG, free DuckDuckGo Web Search, or Conversation Memory | [`src/router.py`](src/router.py) |
 | **Multi-format ingestion** | PDF · DOCX · TXT · Markdown · images (OCR) · web-page URLs · YouTube transcripts | [`src/ingestion.py`](src/ingestion.py) |
 | **Conversation memory** | Sends recent turns; compresses long histories to a summary past a threshold to cut tokens | [`src/memory.py`](src/memory.py) |
-| **Persistence & auth** | Supabase profiles, saved documents/chats, pgvector embeddings, persisted metrics — graceful no-op until configured | [`src/storage.py`](src/storage.py), [`supabase/schema.sql`](supabase/schema.sql) |
+| **Persistence & auth** | Supabase profiles, saved documents/chats, pgvector embeddings, persisted metrics — graceful no-op until configured | [`src/storage.py`](src/storage.py), [`db/schema.sql`](db/schema.sql) |
 | **Observability** | Per-request latency, tokens, est. cost, fallback/route | `GET /api/metrics` |
 
 > **Budget posture:** routing, reranking, confidence, follow-ups, and retrieval-metric evaluation add **zero** per-request LLM cost. The only paid LLM calls are embeddings + answer generation (and, opt-in, history compression and judge-based eval). See [docs/SUPABASE_SETUP.md](docs/SUPABASE_SETUP.md) to enable persistence.

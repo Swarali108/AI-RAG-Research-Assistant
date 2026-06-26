@@ -10,7 +10,7 @@ project.
 
 Activation:
 1. Create a Supabase project, enable the ``vector`` extension, and run
-   ``supabase/schema.sql``.
+   ``db/schema.sql``.
 2. Set SUPABASE_URL and SUPABASE_KEY (service-role key for the backend) in your
    environment. Optionally SUPABASE_JWT_SECRET to verify user access tokens.
 """
