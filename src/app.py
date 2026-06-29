@@ -1444,13 +1444,6 @@ def home():
         <button class="share" id="shareButton">↗ Share</button>
       </div>
 
-      <div class="quick-grid">
-        <div class="quick-card"><strong>✨ Summarize</strong><span>Summarize any document</span></div>
-        <div class="quick-card"><strong>🧠 Key takeaways</strong><span>Extract key points</span></div>
-        <div class="quick-card"><strong>♙ Compare</strong><span>Compare frameworks</span></div>
-        <div class="quick-card"><strong>💡 Suggest questions</strong><span>Get smart suggestions</span></div>
-      </div>
-
       <div class="tab-bar">
         <button class="tab active" data-tab="chat">Chat</button>
         <button class="tab" data-tab="inspector">RAG Inspector</button>
