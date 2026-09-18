@@ -840,20 +840,64 @@ def home():
   <title>AI RAG Research Assistant</title>
   <style>
     :root {
-      color-scheme: dark;
-      --bg: #050713;
-      --sidebar: #070a18;
-      --panel: rgba(13, 18, 36, 0.92);
-      --panel-soft: rgba(21, 27, 52, 0.86);
-      --line: rgba(181, 198, 255, 0.14);
-      --text: #f8f7ff;
-      --muted: #aeb5d3;
-      --purple: #9b5cff;
-      --pink: #f06abf;
-      --cyan: #47ead8;
-      --blue: #65b8ff;
-      --green: #60f3a9;
-      --danger: #fb7185;
+      color-scheme: light;
+
+      /* Orchid noir - deep plum-violet, the primary brand ramp */
+      --orchid-950: #1f0b24;
+      --orchid-900: #2e1133;
+      --orchid-800: #431a4b;
+      --orchid-700: #5c2466;
+      --orchid-600: #7a3187;
+      --orchid-500: #9a46a9;
+      --orchid-400: #b76bc5;
+      --orchid-300: #d09bda;
+      --orchid-200: #e6c8ec;
+      --orchid-100: #f3e6f6;
+      --orchid-50:  #faf4fb;
+
+      /* Sunshine - warm yellow, the secondary accent */
+      --sun-800: #7a5300;
+      --sun-700: #a06c00;
+      --sun-600: #c98b06;
+      --sun-500: #eaac10;
+      --sun-400: #fbc53c;
+      --sun-300: #ffd968;
+      --sun-200: #ffe9a3;
+      --sun-100: #fff5d6;
+      --sun-50:  #fffbec;
+
+      /* Surfaces */
+      --bg: #faf6fb;
+      --surface: #ffffff;
+      --surface-soft: #f6edf8;
+      --surface-sunk: #f1e6f4;
+      --sidebar: #ffffff;
+      --panel: #ffffff;
+      --panel-soft: var(--orchid-50);
+      --input-bg: #ffffff;
+
+      /* Ink */
+      --text: #2e1133;
+      --muted: #6e5876;
+      --line: rgba(67, 26, 75, 0.14);
+      --line-strong: rgba(67, 26, 75, 0.28);
+
+      /* Semantic */
+      --danger: #b3243f;
+      --success: #0f7a55;
+      --warning: var(--sun-800);
+
+      /* Legacy aliases - kept so any stray rule still resolves */
+      --purple: var(--orchid-600);
+      --pink: var(--orchid-400);
+      --cyan: var(--orchid-700);
+      --blue: var(--orchid-500);
+      --green: var(--success);
+
+      /* Elevation - light themes need far softer shadows than dark ones */
+      --shadow-sm: 0 1px 2px rgba(46, 17, 51, 0.06);
+      --shadow-md: 0 6px 18px rgba(46, 17, 51, 0.07);
+      --shadow-lg: 0 16px 44px rgba(46, 17, 51, 0.10);
     }
     * { box-sizing: border-box; }
     body {
@@ -862,7 +906,9 @@ def home():
       overflow: hidden;
       font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
       background:
-        linear-gradient(145deg, #050713 0%, #071022 46%, #050713 100%);
+        radial-gradient(900px 520px at 100% 0%, rgba(251, 197, 60, 0.16), transparent 60%),
+        radial-gradient(760px 480px at 0% 100%, rgba(154, 70, 169, 0.10), transparent 62%),
+        var(--bg);
       color: var(--text);
     }
     button, input, textarea, select { font: inherit; }
@@ -875,7 +921,7 @@ def home():
     .sidebar {
       padding: 22px;
       border-right: 1px solid var(--line);
-      background: linear-gradient(180deg, rgba(9, 12, 28, 0.98), rgba(5, 7, 19, 0.98));
+      background: var(--sidebar);
       overflow-y: auto;
     }
     .brand {
@@ -890,10 +936,10 @@ def home():
       display: grid;
       place-items: center;
       border-radius: 8px;
-      background: linear-gradient(135deg, var(--purple), var(--pink));
+      background: linear-gradient(135deg, var(--orchid-700), var(--sun-400));
       font-size: 1.6rem;
     }
-    .brand strong { display: block; font-size: 1.1rem; }
+    .brand strong { display: block; font-size: 1.1rem; color: var(--orchid-900); }
     .brand span, .muted { color: var(--muted); }
     .new-chat, .primary-action {
       width: 100%;
@@ -901,17 +947,17 @@ def home():
       border-radius: 8px;
       padding: 14px 16px;
       color: white;
-      background: linear-gradient(135deg, #7438ff, #b936e8);
+      background: linear-gradient(135deg, var(--orchid-700), var(--orchid-500));
       font-weight: 800;
       cursor: pointer;
-      box-shadow: 0 18px 42px rgba(116, 56, 255, 0.25);
+      box-shadow: 0 10px 24px rgba(92, 36, 102, 0.22);
     }
     .profile-field {
       margin-bottom: 16px;
       padding: 12px;
       border: 1px solid var(--line);
       border-radius: 8px;
-      background: rgba(13, 18, 36, 0.72);
+      background: var(--surface-soft);
     }
     .profile-field label {
       display: block;
@@ -928,8 +974,12 @@ def home():
       border-radius: 8px;
       padding: 10px 11px;
       color: var(--text);
-      background: rgba(5, 7, 19, 0.72);
+      background: var(--input-bg);
       outline: none;
+    }
+    .profile-field input:focus {
+      border-color: var(--orchid-400);
+      box-shadow: 0 0 0 3px rgba(183, 107, 197, 0.22);
     }
     .nav, .library { margin-top: 18px; }
     .nav-item, .library-item, .recent-item {
@@ -943,11 +993,17 @@ def home():
       color: var(--muted);
       background: transparent;
       text-align: left;
+      cursor: pointer;
+    }
+    .nav-item:hover, .library-item:hover, .recent-item:hover {
+      color: var(--orchid-800);
+      background: var(--orchid-50);
     }
     .nav-item.active, .library-item.active, .recent-item.active {
-      color: var(--text);
-      border-color: rgba(155, 92, 255, 0.28);
-      background: linear-gradient(90deg, rgba(155, 92, 255, 0.24), rgba(71, 234, 216, 0.05));
+      color: var(--orchid-900);
+      font-weight: 700;
+      border-color: var(--orchid-200);
+      background: linear-gradient(90deg, var(--orchid-100), var(--sun-50));
     }
     .section-label {
       margin: 18px 0 10px;
@@ -976,17 +1032,19 @@ def home():
       font-size: clamp(1.9rem, 4vw, 2.65rem);
       line-height: 1;
       letter-spacing: 0;
-      color: #c896ff;
+      color: var(--orchid-800);
     }
-    .subtitle { margin: 0; font-size: 1rem; color: var(--text); }
+    .subtitle { margin: 0; font-size: 1rem; color: var(--muted); }
     .share {
       border: 1px solid var(--line);
       border-radius: 8px;
       padding: 9px 13px;
-      color: var(--text);
-      background: rgba(18, 24, 48, 0.86);
+      color: var(--orchid-800);
+      background: var(--surface);
+      box-shadow: var(--shadow-sm);
       cursor: pointer;
     }
+    .share:hover { background: var(--orchid-50); border-color: var(--orchid-200); }
     .quick-grid {
       display: grid;
       grid-template-columns: repeat(4, minmax(0, 1fr));
@@ -997,8 +1055,8 @@ def home():
     .quick-card, .panel, .inspector-panel {
       border: 1px solid var(--line);
       border-radius: 8px;
-      background: linear-gradient(180deg, rgba(14, 19, 40, 0.92), rgba(8, 12, 28, 0.92));
-      box-shadow: 0 24px 80px rgba(0, 0, 0, 0.22);
+      background: var(--panel);
+      box-shadow: var(--shadow-md);
     }
     .quick-card { padding: 12px 14px; min-height: 64px; }
     .quick-card strong { display: block; margin-bottom: 5px; font-size: 0.95rem; }
@@ -1010,7 +1068,7 @@ def home():
       padding: 4px;
       border: 1px solid var(--line);
       border-radius: 8px;
-      background: rgba(9, 13, 29, 0.82);
+      background: var(--surface-sunk);
       margin-bottom: 10px;
       flex: 0 0 auto;
       width: max-content;
@@ -1025,7 +1083,8 @@ def home():
     }
     .tab.active {
       color: white;
-      background: linear-gradient(135deg, rgba(155, 92, 255, 0.8), rgba(240, 106, 191, 0.66));
+      font-weight: 700;
+      background: linear-gradient(135deg, var(--orchid-700), var(--orchid-500));
     }
     .tab-view { display: none; }
     .tab-view.active {
@@ -1071,10 +1130,12 @@ def home():
       padding: 18px;
       line-height: 1.65;
       white-space: pre-wrap;
-      background: rgba(13, 18, 38, 0.94);
+      background: var(--surface);
+      box-shadow: var(--shadow-sm);
     }
     .bubble.user {
-      background: linear-gradient(135deg, rgba(89, 47, 202, 0.86), rgba(33, 24, 80, 0.9));
+      border-color: var(--orchid-200);
+      background: linear-gradient(135deg, var(--orchid-100), var(--orchid-50));
     }
     .bot-face {
       width: 48px;
@@ -1082,7 +1143,7 @@ def home():
       display: grid;
       place-items: center;
       border-radius: 50%;
-      background: linear-gradient(135deg, #3d2ab8, #d64eb2);
+      background: linear-gradient(135deg, var(--orchid-700), var(--orchid-400));
       flex: 0 0 auto;
     }
     .mode-pill {
@@ -1092,30 +1153,33 @@ def home():
       margin-bottom: 12px;
       border-radius: 999px;
       padding: 7px 10px;
-      color: #ffc3ef;
-      background: rgba(240, 106, 191, 0.11);
-      border: 1px solid rgba(240, 106, 191, 0.22);
+      color: var(--orchid-800);
+      background: var(--orchid-100);
+      border: 1px solid var(--orchid-200);
       font-weight: 700;
       font-size: 0.9rem;
     }
     .composer {
       margin-top: 20px;
-      border: 1px solid rgba(181, 198, 255, 0.2);
+      border: 1px solid var(--line);
       border-radius: 8px;
       padding: 16px;
-      background: rgba(8, 12, 28, 0.84);
+      background: var(--surface);
+      box-shadow: var(--shadow-md);
       flex: 0 0 auto;
     }
+    .composer:focus-within { border-color: var(--orchid-300); }
     textarea {
       width: 100%;
       min-height: 88px;
       resize: vertical;
       border: 0;
       outline: none;
-      color: white;
+      color: var(--text);
       background: transparent;
       line-height: 1.5;
     }
+    textarea::placeholder { color: var(--muted); }
     .composer-actions {
       display: flex;
       justify-content: space-between;
@@ -1130,7 +1194,7 @@ def home():
       padding: 4px;
       border: 1px solid var(--line);
       border-radius: 8px;
-      background: rgba(9, 13, 29, 0.86);
+      background: var(--surface-sunk);
     }
     .mode-button {
       border: 0;
@@ -1143,47 +1207,49 @@ def home():
       line-height: 1.2;
     }
     .mode-button small { opacity: 0.75; font-size: 0.72rem; }
+    .mode-button:hover { color: var(--orchid-800); }
     .mode-button.active {
       color: white;
-      background: linear-gradient(135deg, rgba(155, 92, 255, 0.86), rgba(240, 106, 191, 0.72));
+      background: linear-gradient(135deg, var(--orchid-700), var(--orchid-500));
     }
     .send {
       width: 54px;
       height: 48px;
       border: 0;
       border-radius: 8px;
-      color: white;
-      background: linear-gradient(135deg, #7c3aed, #b23fe8);
+      color: var(--orchid-950);
+      background: linear-gradient(135deg, var(--sun-400), var(--sun-300));
       cursor: pointer;
       font-size: 1.2rem;
+      box-shadow: 0 8px 20px rgba(234, 172, 16, 0.32);
     }
     .send:disabled { opacity: 0.6; cursor: wait; }
     .rightbar {
       padding: 22px 22px;
       border-left: 1px solid var(--line);
-      background: rgba(5, 7, 19, 0.68);
+      background: var(--surface);
       overflow-y: auto;
     }
     .doc-card, .side-card {
       border: 1px solid var(--line);
       border-radius: 8px;
       padding: 18px;
-      background: linear-gradient(180deg, rgba(18, 23, 48, 0.94), rgba(8, 12, 28, 0.94));
+      background: var(--orchid-50);
       margin-bottom: 16px;
     }
     .file-input {
       width: 100%;
-      border: 1px dashed rgba(155, 92, 255, 0.42);
+      border: 1px dashed var(--orchid-300);
       border-radius: 8px;
       padding: 12px;
       color: var(--muted);
-      background: rgba(5, 7, 19, 0.52);
+      background: var(--surface);
     }
     .progress {
       height: 8px;
       border-radius: 999px;
       margin-top: 14px;
-      background: linear-gradient(90deg, var(--purple), var(--pink), var(--cyan));
+      background: linear-gradient(90deg, var(--orchid-700), var(--orchid-400), var(--sun-400));
     }
     .insight-grid {
       display: grid;
@@ -1194,10 +1260,10 @@ def home():
     .metric {
       padding: 12px;
       border-radius: 8px;
-      background: rgba(21, 27, 52, 0.82);
+      background: var(--surface);
       border: 1px solid var(--line);
     }
-    .metric strong { display: block; font-size: 1.4rem; color: #d8c3ff; }
+    .metric strong { display: block; font-size: 1.4rem; color: var(--orchid-700); }
     .metric span { color: var(--muted); font-size: 0.82rem; }
     .topic-list, .question-list {
       display: flex;
@@ -1207,20 +1273,22 @@ def home():
     .topic {
       border-radius: 999px;
       padding: 8px 11px;
-      color: white;
-      background: linear-gradient(135deg, rgba(240, 106, 191, 0.66), rgba(71, 234, 216, 0.24));
+      color: var(--orchid-900);
+      background: var(--sun-200);
+      border: 1px solid var(--sun-300);
       font-size: 0.84rem;
     }
     .suggestion {
       width: 100%;
-      border: 1px solid transparent;
+      border: 1px solid var(--line);
       border-radius: 8px;
       padding: 10px;
       color: var(--text);
-      background: rgba(21, 27, 52, 0.72);
+      background: var(--surface);
       text-align: left;
       cursor: pointer;
     }
+    .suggestion:hover { border-color: var(--orchid-300); background: var(--orchid-50); }
     .inspector-grid {
       display: grid;
       grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
@@ -1237,8 +1305,8 @@ def home():
       padding: 14px;
       border-radius: 8px;
       border: 1px solid var(--line);
-      background: rgba(4, 7, 16, 0.92);
-      color: #d7e3ff;
+      background: var(--orchid-50);
+      color: var(--orchid-900);
       white-space: pre-wrap;
       line-height: 1.45;
     }
@@ -1247,19 +1315,19 @@ def home():
       padding: 12px;
       border: 1px solid var(--line);
       border-radius: 8px;
-      background: rgba(21, 27, 52, 0.58);
+      background: var(--surface);
     }
     .score-track {
       height: 7px;
       border-radius: 999px;
-      background: rgba(255,255,255,0.09);
+      background: var(--surface-sunk);
       overflow: hidden;
       margin-top: 8px;
     }
     .score-fill {
       height: 100%;
       border-radius: inherit;
-      background: linear-gradient(90deg, var(--purple), var(--cyan));
+      background: linear-gradient(90deg, var(--orchid-700), var(--sun-400));
     }
     .empty-state {
       padding: 34px;
@@ -1269,7 +1337,7 @@ def home():
     .sidebar-empty {
       padding: 11px 12px;
       color: var(--muted);
-      border: 1px dashed var(--line);
+      border: 1px dashed var(--line-strong);
       border-radius: 8px;
       font-size: 0.92rem;
       line-height: 1.45;
@@ -1286,23 +1354,23 @@ def home():
       font-weight: 700;
       border: 1px solid var(--line);
     }
-    .conf-high { color: #bdf7d6; background: rgba(96, 243, 169, 0.12); border-color: rgba(96, 243, 169, 0.3); }
-    .conf-medium { color: #ffe2b0; background: rgba(251, 191, 36, 0.12); border-color: rgba(251, 191, 36, 0.32); }
-    .conf-low { color: #ffc3cf; background: rgba(251, 113, 133, 0.12); border-color: rgba(251, 113, 133, 0.34); }
+    .conf-high { color: #0b5c40; background: #e3f6ee; border-color: #9cd8c2; }
+    .conf-medium { color: var(--sun-800); background: var(--sun-100); border-color: var(--sun-300); }
+    .conf-low { color: #8f1c33; background: #fdeaee; border-color: #f3b9c4; }
     .answer-warning {
       margin: 10px 0 0;
       padding: 10px 12px;
       border-radius: 8px;
       font-size: 0.86rem;
-      color: #ffc3cf;
-      background: rgba(251, 113, 133, 0.1);
-      border: 1px solid rgba(251, 113, 133, 0.3);
+      color: #8f1c33;
+      background: #fdeaee;
+      border: 1px solid #f3b9c4;
     }
     .sources { margin-top: 14px; border-top: 1px solid var(--line); padding-top: 10px; }
     .sources > summary {
       cursor: pointer;
       font-weight: 700;
-      color: var(--cyan);
+      color: var(--orchid-600);
       font-size: 0.88rem;
       list-style: none;
     }
@@ -1311,7 +1379,7 @@ def home():
       padding: 10px 12px;
       border: 1px solid var(--line);
       border-radius: 8px;
-      background: rgba(8, 12, 28, 0.6);
+      background: var(--orchid-50);
     }
     .source-item strong { font-size: 0.86rem; }
     .source-item .source-text {
@@ -1324,8 +1392,8 @@ def home():
       white-space: pre-wrap;
     }
     mark {
-      background: rgba(155, 92, 255, 0.42);
-      color: #fff;
+      background: var(--sun-300);
+      color: var(--orchid-950);
       border-radius: 3px;
       padding: 0 2px;
     }
@@ -1348,7 +1416,7 @@ def home():
       margin-top: 6px;
       border: 1px solid var(--line);
       border-radius: 6px;
-      background: rgba(8, 12, 28, 0.6);
+      background: var(--surface);
     }
     .file-name {
       font-size: 0.82rem;
@@ -1368,7 +1436,7 @@ def home():
       padding: 2px 6px;
       border-radius: 6px;
     }
-    .file-remove:hover { background: rgba(251, 113, 133, 0.16); }
+    .file-remove:hover { background: #fdeaee; }
     .file-clear-row {
       display: flex;
       align-items: center;
@@ -1378,15 +1446,15 @@ def home():
       color: var(--muted);
     }
     .file-clear {
-      border: 1px solid rgba(251, 113, 133, 0.34);
-      background: rgba(251, 113, 133, 0.1);
+      border: 1px solid #f3b9c4;
+      background: #fdeaee;
       color: var(--danger);
       cursor: pointer;
       font-size: 0.76rem;
       padding: 3px 9px;
       border-radius: 999px;
     }
-    .file-clear:hover { background: rgba(251, 113, 133, 0.2); }
+    .file-clear:hover { background: #fbd8de; }
     @media (max-width: 1180px) {
       .app-shell { grid-template-columns: 280px minmax(0, 1fr); }
       .rightbar { display: none; }
@@ -1506,8 +1574,8 @@ def home():
         <label for="files"><strong id="docTitle">Add knowledge sources</strong></label>
         <input class="file-input" id="files" type="file" accept=".pdf,.docx,.txt,.md,.markdown,.png,.jpg,.jpeg,.webp,.bmp,.tiff" multiple />
         <div class="muted" style="margin-top:8px;font-size:0.78rem;">PDF · DOCX · TXT · Markdown · images (OCR)</div>
-        <input id="urlInput" class="profile-field" style="width:100%;margin-top:10px;padding:10px;border-radius:8px;border:1px solid var(--line);background:rgba(5,7,19,0.72);color:var(--text);" type="url" placeholder="…or paste a web page URL" />
-        <input id="youtubeInput" class="profile-field" style="width:100%;margin-top:8px;padding:10px;border-radius:8px;border:1px solid var(--line);background:rgba(5,7,19,0.72);color:var(--text);" type="url" placeholder="…or a YouTube link (transcript)" />
+        <input id="urlInput" class="profile-field" style="width:100%;margin-top:10px;padding:10px;border-radius:8px;border:1px solid var(--line);background:var(--input-bg);color:var(--text);" type="url" placeholder="…or paste a web page URL" />
+        <input id="youtubeInput" class="profile-field" style="width:100%;margin-top:8px;padding:10px;border-radius:8px;border:1px solid var(--line);background:var(--input-bg);color:var(--text);" type="url" placeholder="…or a YouTube link (transcript)" />
         <div class="muted" id="fileStatus" style="margin-top:8px;">No source added yet.</div>
         <div class="progress"></div>
       </div>
