@@ -39,11 +39,11 @@ This project also demonstrates the wider AI-engineering stack — RAG, agents, e
 | **Evaluation harness** | Hit Rate / MRR / Recall@K / Precision@K (free) + opt-in LLM-judge Faithfulness & Answer Relevance | [`src/evaluation.py`](src/evaluation.py), `GET /api/eval` |
 | **Agentic query router** | Routes each question to Document RAG, free DuckDuckGo Web Search, or Conversation Memory | [`src/router.py`](src/router.py) |
 | **Multi-format ingestion** | PDF · DOCX · TXT · Markdown · images (OCR) · web-page URLs · YouTube transcripts | [`src/ingestion.py`](src/ingestion.py) |
-| **Conversation memory** | Sends recent turns; compresses long histories to a summary past a threshold to cut tokens | [`src/memory.py`](src/memory.py) |
+| **Conversation memory** | Sends the full conversation verbatim on every follow-up, with no window or summarising | [`src/memory.py`](src/memory.py) |
 | **Persistence** | Neon Postgres profiles, saved documents/chats, pgvector embeddings, persisted metrics — graceful no-op until configured | [`src/storage.py`](src/storage.py), [`db/schema.sql`](db/schema.sql) |
 | **Observability** | Per-request latency, tokens, est. cost, fallback/route | `GET /api/metrics` |
 
-> **Budget posture:** routing, reranking, confidence, follow-ups, and retrieval-metric evaluation add **zero** per-request LLM cost. The only paid LLM calls are embeddings + answer generation (and, opt-in, history compression and judge-based eval). See [docs/DATABASE_SETUP.md](docs/DATABASE_SETUP.md) to enable persistence.
+> **Budget posture:** routing, reranking, confidence, follow-ups, and retrieval-metric evaluation add **zero** per-request LLM cost. The only paid LLM calls are embeddings + answer generation (and, opt-in, judge-based eval). See [docs/DATABASE_SETUP.md](docs/DATABASE_SETUP.md) to enable persistence.
 
 ### Key API endpoints
 
@@ -95,7 +95,7 @@ Then open http://127.0.0.1:8000.
 | `OPENROUTER_API_KEY` | yes | [OpenRouter](https://openrouter.ai/keys) API key used for embeddings and answer generation |
 | `OPENROUTER_MODEL` | no | Generation model (default `anthropic/claude-haiku-5.5`) |
 | `OPENROUTER_EMBEDDING_MODEL` | no | Embedding model (default `openai/text-embedding-3-small`) |
-| `OPENROUTER_MAX_OUTPUT_TOKENS` | no | Cap on answer length to control output cost (default `800`) |
+| `OPENROUTER_MAX_OUTPUT_TOKENS` | no | Optional cap on answer length to control output cost (default: no cap) |
 | `MAX_EMBED_CHUNKS` | no | Skip semantic embeddings above this many chunks; use free BM25 instead (default `250`) |
 | `ALLOWED_ORIGINS` | no | Comma-separated list of allowed CORS origins (defaults to `*`) |
 | `MAX_UPLOAD_MB` | no | Per-file upload size limit in MB (default `15`) |

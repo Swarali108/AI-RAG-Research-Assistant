@@ -11,7 +11,7 @@ from dotenv import load_dotenv
 from fastapi import Depends, FastAPI, File, Form, Header, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse, StreamingResponse
-from openai import OpenAI
+from openai import NOT_GIVEN, OpenAI
 from pydantic import BaseModel
 
 try:
@@ -41,7 +41,7 @@ try:
         extract_youtube,
     )
     from src.router import route_question, web_search
-    from src.memory import format_history, has_history, prepare_history
+    from src.memory import format_history, has_history
 except ImportError:
     from ingestion import (
         SUPPORTED_UPLOAD_EXTENSIONS,
@@ -50,7 +50,7 @@ except ImportError:
         extract_youtube,
     )
     from router import route_question, web_search
-    from memory import format_history, has_history, prepare_history
+    from memory import format_history, has_history
 
 try:
     from src.storage import store
@@ -89,6 +89,10 @@ MAX_UPLOAD_BYTES = int(MAX_UPLOAD_MB * 1024 * 1024)
 OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
 # Generation: strong at grounded, well-structured answers at ~$0.001 per question.
 GENERATION_MODEL = os.getenv("OPENROUTER_MODEL", "anthropic/claude-haiku-5.5")
+# Claude Haiku 5.5 thinks before answering by default on OpenRouter, and those
+# hidden reasoning tokens count against max_tokens: at 800 they consumed ~740,
+# leaving a ~25-word answer. Grounded RAG answers don't need it, so turn it off.
+GENERATION_EXTRA_BODY = {"reasoning": {"enabled": False}}
 # Embeddings: nearly free, powers hybrid semantic retrieval.
 EMBEDDING_MODEL = os.getenv("OPENROUTER_EMBEDDING_MODEL", "openai/text-embedding-3-small")
 # Optional attribution headers shown on OpenRouter dashboards.
@@ -98,8 +102,10 @@ OPENROUTER_HEADERS = {
 }
 
 # --- Cost guardrails (keep a small budget lasting) ---
-# Cap answer length so a runaway response can't burn output tokens.
-GENERATION_MAX_TOKENS = int(os.getenv("OPENROUTER_MAX_OUTPUT_TOKENS", "800"))
+# No answer-length cap by default: the model stops when the answer is complete.
+# Set OPENROUTER_MAX_OUTPUT_TOKENS to reintroduce a ceiling if costs need reining in.
+_max_output_env = os.getenv("OPENROUTER_MAX_OUTPUT_TOKENS", "").strip()
+GENERATION_MAX_TOKENS = int(_max_output_env) if _max_output_env else None
 # Skip semantic embeddings for very large documents (fall back to free BM25),
 # so a huge PDF can't rack up embedding costs on every question.
 MAX_EMBED_CHUNKS = int(os.getenv("MAX_EMBED_CHUNKS", "250"))
@@ -109,7 +115,6 @@ MODES: Dict[str, Dict[str, Any]] = {
     "research": {
         "label": "Research Mode",
         "temperature": 0.2,
-        "max_tokens": GENERATION_MAX_TOKENS,
         "tone": (
             "Use Research Mode. Be professional, factual, concise, and recruiter-friendly. "
             "Use clear structure and headings, avoid slang, and prioritize accuracy."
@@ -123,7 +128,6 @@ MODES: Dict[str, Dict[str, Any]] = {
     "bestie": {
         "label": "Bestie Mode",
         "temperature": 0.65,
-        "max_tokens": GENERATION_MAX_TOKENS,
         "tone": (
             "Use Bestie Mode. Be sassy, fun, and lightly chaotic, using casual internet "
             "language naturally (bestie, ngl, lowkey, fr, the tea, TL;DR) without overdoing it. "
@@ -138,7 +142,6 @@ MODES: Dict[str, Dict[str, Any]] = {
     "beginner": {
         "label": "Beginner Mode",
         "temperature": 0.4,
-        "max_tokens": GENERATION_MAX_TOKENS,
         "tone": (
             "Use Beginner Mode. Assume no prior knowledge. Use simple words and short sentences, "
             "define every piece of jargon in plain language, and use everyday analogies. Be patient "
@@ -153,7 +156,6 @@ MODES: Dict[str, Dict[str, Any]] = {
     "interview": {
         "label": "Interview Mode",
         "temperature": 0.3,
-        "max_tokens": 700,
         "tone": (
             "Use Interview Mode. Optimize for interview preparation: lead with the crisp answer, then "
             "tight bullet points of the key facts worth remembering. Highlight common follow-up angles "
@@ -168,7 +170,6 @@ MODES: Dict[str, Dict[str, Any]] = {
     "professor": {
         "label": "Professor Mode",
         "temperature": 0.3,
-        "max_tokens": 900,
         "tone": (
             "Use Professor Mode. Be rigorous and in-depth with an academic tone. Define terms precisely, "
             "explain mechanisms and reasoning, note nuances, assumptions, and caveats, and structure the "
@@ -183,7 +184,6 @@ MODES: Dict[str, Dict[str, Any]] = {
     "summary": {
         "label": "30-Second Summary",
         "temperature": 0.2,
-        "max_tokens": 240,
         "tone": (
             "Use 30-Second Summary Mode. Give the absolute essentials only: a one-line takeaway followed "
             "by at most 3-5 short bullet points. No preamble, no filler. Fast to read."
@@ -687,7 +687,8 @@ def generate_answer(prompt: str, temperature: float = 0.2, max_tokens: Optional[
         model=GENERATION_MODEL,
         messages=[{"role": "user", "content": prompt}],
         temperature=temperature,
-        max_tokens=max_tokens or GENERATION_MAX_TOKENS,
+        max_tokens=max_tokens or GENERATION_MAX_TOKENS or NOT_GIVEN,
+        extra_body=GENERATION_EXTRA_BODY,
     )
     usage = getattr(response, "usage", None)
     if usage is not None:
@@ -706,7 +707,8 @@ def stream_answer(
         model=GENERATION_MODEL,
         messages=[{"role": "user", "content": prompt}],
         temperature=temperature,
-        max_tokens=max_tokens or GENERATION_MAX_TOKENS,
+        max_tokens=max_tokens or GENERATION_MAX_TOKENS or NOT_GIVEN,
+        extra_body=GENERATION_EXTRA_BODY,
         stream=True,
         stream_options={"include_usage": True},
     )
@@ -800,9 +802,9 @@ def _persist_metrics(metrics: Dict[str, Any], route: Optional[str], user_id: Opt
 
 
 def build_history_context(history_json: Optional[str]):
-    """Parse the client's chat history, compress it if long (#5), and return a
-    (context_string, has_history) pair for prompt injection. Budget-safe: the
-    summarizer only runs for long conversations."""
+    """Parse the client's chat history and return a (context_string, has_history)
+    pair for prompt injection. The whole conversation is passed verbatim: no
+    window and no summarising of older turns, so follow-ups can reach any detail."""
     if not history_json:
         return "", False
     try:
@@ -812,16 +814,8 @@ def build_history_context(history_json: Optional[str]):
     except (json.JSONDecodeError, TypeError):
         return "", False
 
-    summarizer = lambda text: generate_answer(text, temperature=0.1, max_tokens=200)
-    prepared = prepare_history(turns, summarizer_fn=summarizer)
-
-    parts = []
-    if prepared["summary"]:
-        parts.append("Summary of earlier conversation:\n" + prepared["summary"])
-    if prepared["recent"]:
-        parts.append("Recent turns:\n" + format_history(prepared["recent"]))
-
-    return "\n\n".join(parts), has_history(turns)
+    history = format_history(turns)
+    return ("Conversation so far:\n" + history if history else ""), has_history(turns)
 
 
 def serialize_event(event: str, data: Dict[str, Any]):
@@ -1673,13 +1667,15 @@ def home():
     let streamingTimer = null;
     let activeAnswerNode = null;
     let pendingFinalAnswer = null;
-    let chatHistory = [];
-    let conversationTurns = [];
+    // Each chat: { id, title, turns: [{ role, content, mode }] }, newest first.
+    let chats = loadChats();
+    let currentChatId = null;
     let selectedFiles = [];
 
     const savedName = localStorage.getItem("ragUserName") || "";
     userNameInput.value = savedName;
     updateGreeting(savedName);
+    renderRecentChats();
 
     userNameInput.addEventListener("input", () => {
       const cleanName = userNameInput.value.trim();
@@ -1783,7 +1779,8 @@ def home():
 
     document.getElementById("newChat").addEventListener("click", () => {
       messages.innerHTML = '<div class="empty-state">Fresh chat ready. Upload a PDF and ask away.</div>';
-      conversationTurns = [];
+      currentChatId = null;
+      renderRecentChats();
       questionInput.value = "";
       latestAnswer = "";
       updateInspector(null);
@@ -1870,8 +1867,15 @@ def home():
 
       addMessage("user", question);
       questionInput.value = "";
-      updateRecentChats(question);
-      const answerNode = addMessage("assistant", "", currentMode);
+      if (!currentChatId) {
+        currentChatId = Date.now().toString(36);
+        chats.unshift({ id: currentChatId, title: question, turns: [] });
+      }
+      const chatId = currentChatId;
+      const mode = currentMode;
+      const history = chatTurns(chatId).map(({ role, content }) => ({ role, content }));
+      appendTurn(chatId, { role: "user", content: question });
+      const answerNode = addMessage("assistant", "", mode);
       latestAnswer = "";
       wordQueue = [];
       pendingFinalAnswer = null;
@@ -1887,8 +1891,7 @@ def home():
       formData.append("question", question);
       formData.append("answer_mode", currentMode);
       formData.append("use_web", document.getElementById("webToggle").checked ? "true" : "false");
-      formData.append("history", JSON.stringify(conversationTurns.slice(-10)));
-      conversationTurns.push({ role: "user", content: question });
+      formData.append("history", JSON.stringify(history));
 
       try {
         const response = await fetch("/api/research/stream", {
@@ -1917,12 +1920,12 @@ def home():
           buffer = events.pop() || "";
 
           for (const eventText of events) {
-            handleStreamEvent(eventText, answerNode);
+            handleStreamEvent(eventText, answerNode, chatId, mode);
           }
         }
 
         if (buffer.trim()) {
-          handleStreamEvent(buffer, answerNode);
+          handleStreamEvent(buffer, answerNode, chatId, mode);
         }
       } catch (error) {
         answerNode.textContent = error.message;
@@ -1932,7 +1935,7 @@ def home():
       }
     }
 
-    function handleStreamEvent(eventText, answerNode) {
+    function handleStreamEvent(eventText, answerNode, chatId, mode) {
       const eventLine = eventText.split("\\n").find(line => line.startsWith("event:"));
       const dataLine = eventText.split("\\n").find(line => line.startsWith("data:"));
 
@@ -1962,7 +1965,7 @@ def home():
         renderMetrics(answerNode, payload.metrics);
         renderFollowUps(payload.follow_up_questions);
         showInspectorMetrics(payload.metrics);
-        conversationTurns.push({ role: "assistant", content: payload.answer || latestAnswer });
+        appendTurn(chatId, { role: "assistant", content: payload.answer || latestAnswer, mode });
       }
 
       if (eventName === "error") {
@@ -2068,31 +2071,76 @@ def home():
       node.classList.add("danger");
     }
 
-    function updateRecentChats(question) {
-      chatHistory = [question, ...chatHistory.filter(item => item !== question)].slice(0, 8);
+    function loadChats() {
+      try {
+        return JSON.parse(localStorage.getItem("ragChats") || "[]");
+      } catch (error) {
+        return [];
+      }
+    }
+
+    function saveChats() {
+      // No cap on saved chats. Only if the browser's storage quota is full do
+      // the oldest chats stop being saved; they stay usable this session.
+      for (let keep = chats.length; keep > 0; keep--) {
+        try {
+          localStorage.setItem("ragChats", JSON.stringify(chats.slice(0, keep)));
+          return;
+        } catch (error) {
+          // Quota exceeded (or storage blocked): retry with one fewer chat.
+        }
+      }
+    }
+
+    function chatTurns(chatId) {
+      const chat = chats.find(item => item.id === chatId);
+      return chat ? chat.turns : [];
+    }
+
+    function appendTurn(chatId, turn) {
+      const chat = chats.find(item => item.id === chatId);
+      if (!chat) return;
+      chat.turns.push(turn);
+      // Most recently used chat moves to the top.
+      chats = [chat, ...chats.filter(item => item.id !== chatId)];
+      saveChats();
       renderRecentChats();
     }
 
+    function openChat(chatId) {
+      const chat = chats.find(item => item.id === chatId);
+      if (!chat) return;
+      stopWordStreamer();
+      wordQueue = [];
+      pendingFinalAnswer = null;
+      activeAnswerNode = null;
+      currentChatId = chatId;
+      messages.innerHTML = "";
+      latestAnswer = "";
+      chat.turns.forEach(turn => {
+        addMessage(turn.role, turn.content, turn.mode);
+        if (turn.role === "assistant") latestAnswer = turn.content;
+      });
+      inspectAnswer.textContent = latestAnswer;
+      activateTab("chat");
+      renderRecentChats();
+      questionInput.focus();
+    }
+
     function renderRecentChats() {
-      if (!chatHistory.length) {
+      if (!chats.length) {
         recentChats.innerHTML = '<div class="sidebar-empty">No recent chats yet.</div>';
         return;
       }
 
-      recentChats.innerHTML = chatHistory.map((item, index) => `
-        <button class="recent-item ${index === 0 ? "active" : ""}" type="button" data-question="${escapeHtml(item)}">
-          💬 <span>${escapeHtml(shortenText(item, 42))}</span>
+      recentChats.innerHTML = chats.map(chat => `
+        <button class="recent-item ${chat.id === currentChatId ? "active" : ""}" type="button" data-chat-id="${escapeHtml(chat.id)}">
+          💬 <span>${escapeHtml(shortenText(chat.title, 42))}</span>
         </button>
       `).join("");
 
       recentChats.querySelectorAll(".recent-item").forEach(button => {
-        button.addEventListener("click", () => {
-          recentChats.querySelectorAll(".recent-item").forEach(item => item.classList.remove("active"));
-          button.classList.add("active");
-          questionInput.value = button.dataset.question || "";
-          activateTab("chat");
-          questionInput.focus();
-        });
+        button.addEventListener("click", () => openChat(button.dataset.chatId));
       });
     }
 
@@ -2374,7 +2422,7 @@ async def research(
 
     try:
         answer = generate_answer(
-            trace["prompt"], temperature=mode["temperature"], max_tokens=mode["max_tokens"]
+            trace["prompt"], temperature=mode["temperature"]
         )
     except Exception as error:
         METRICS["errors"] += 1
@@ -2435,7 +2483,6 @@ async def research_stream(
             for text in stream_answer(
                 trace["prompt"],
                 temperature=mode["temperature"],
-                max_tokens=mode["max_tokens"],
                 usage_sink=usage_sink,
             ):
                 answer_parts.append(text)
