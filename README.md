@@ -20,7 +20,7 @@ Unlike a generic chatbot, this assistant answers from your uploaded documents an
 - **Heading-aware chunking** that splits on section boundaries (markdown/numbered/ALL-CAPS headings) instead of blind fixed windows
 - **Hybrid retrieval**: embeddings (`openai/text-embedding-3-small` via OpenRouter) for semantic similarity, combined with BM25 lexical scoring, with automatic fallback to BM25-only when embeddings are unavailable
 - Per-document caching keyed by file content hash, so a PDF is parsed and embedded once per session instead of on every question
-- **Streamed** answer generation (Server-Sent Events) using `google/gemini-2.5-flash-lite` via OpenRouter
+- **Streamed** answer generation (Server-Sent Events) using `anthropic/claude-haiku-5.5` via OpenRouter
 - **Confidence scoring** from retrieval signals, with a clear low-confidence warning when an answer may not be grounded
 - **Source preview + citation highlighting**: see the exact document text used for each answer, with matched query terms highlighted
 - **Six Explain-Like modes**: Research, Beginner, Interview, Professor, 30-Second Summary, and Bestie — each with its own tone, temperature, and length budget
@@ -93,7 +93,7 @@ Then open http://127.0.0.1:8000.
 | Variable | Required | Description |
 | --- | --- | --- |
 | `OPENROUTER_API_KEY` | yes | [OpenRouter](https://openrouter.ai/keys) API key used for embeddings and answer generation |
-| `OPENROUTER_MODEL` | no | Generation model (default `google/gemini-2.5-flash-lite`) |
+| `OPENROUTER_MODEL` | no | Generation model (default `anthropic/claude-haiku-5.5`) |
 | `OPENROUTER_EMBEDDING_MODEL` | no | Embedding model (default `openai/text-embedding-3-small`) |
 | `OPENROUTER_MAX_OUTPUT_TOKENS` | no | Cap on answer length to control output cost (default `800`) |
 | `MAX_EMBED_CHUNKS` | no | Skip semantic embeddings above this many chunks; use free BM25 instead (default `250`) |

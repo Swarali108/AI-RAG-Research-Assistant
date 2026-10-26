@@ -87,8 +87,8 @@ MAX_UPLOAD_BYTES = int(MAX_UPLOAD_MB * 1024 * 1024)
 
 # All LLM calls go through OpenRouter (OpenAI-compatible API).
 OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
-# Generation: cheap + strong for grounded RAG answers.
-GENERATION_MODEL = os.getenv("OPENROUTER_MODEL", "google/gemini-2.5-flash-lite")
+# Generation: strong at grounded, well-structured answers at ~$0.001 per question.
+GENERATION_MODEL = os.getenv("OPENROUTER_MODEL", "anthropic/claude-haiku-5.5")
 # Embeddings: nearly free, powers hybrid semantic retrieval.
 EMBEDDING_MODEL = os.getenv("OPENROUTER_EMBEDDING_MODEL", "openai/text-embedding-3-small")
 # Optional attribution headers shown on OpenRouter dashboards.
@@ -218,7 +218,7 @@ def resolve_mode(answer_mode: Optional[str]) -> str:
 PRICE_PER_TOKEN = {
     "embedding_in": 0.02 / 1_000_000,
     "generation_in": 0.10 / 1_000_000,
-    "generation_out": 0.40 / 1_000_000,
+    "generation_out": 0.50 / 1_000_000,
 }
 
 # In-process metrics. Resets on cold start (fine for the lite version; Phase 2
@@ -842,66 +842,66 @@ def home():
     :root {
       color-scheme: light;
 
-      /* Orchid noir - warm wine-plum, the primary brand ramp */
-      --plum-950: #1d0b14;
-      --plum-900: #2a1420;
-      --plum-800: #3a1c2b;
-      --plum-700: #4d2338;
-      --plum-600: #5f2d45;
-      --plum-500: #7c4059;
-      --plum-400: #a06a80;
-      --plum-300: #c396a8;
-      --plum-200: #e0c3cf;
-      --plum-100: #f0e1e7;
-      --plum-50:  #f9f1f4;
+      /* Old Lavender (#83587F) - the brand block colour; buttons, frame, accents */
+      --plum-950: #1f1420;
+      --plum-900: #2c1d2b;
+      --plum-800: #43293f;
+      --plum-700: #6c4769;
+      --plum-600: #83587f;
+      --plum-500: #96718f;
+      --plum-400: #b293ad;
+      --plum-300: #ccb5c8;
+      --plum-200: #e2d4df;
+      --plum-100: #f0e8ee;
+      --plum-50:  #f8f4f7;
 
-      /* Warm cream / blush neutrals - the ground everything sits on */
-      --cream-50:  #fffdfc;
-      --cream-100: #fdf7f5;
-      --cream-200: #f9f1ee;
-      --cream-300: #f4e8e4;
-      --cream-400: #eddcd7;
+      /* Cool neutrals - the reading ground */
+      --cream-50:  #ffffff;
+      --cream-100: #fafbfc;
+      --cream-200: #f3f6f8;
+      --cream-300: #e9eff2;
+      --cream-400: #dde6eb;
 
-      /* Sunshine - gold, used sparingly as a warm accent only */
-      --sun-700: #9a7112;
-      --sun-600: #c3941c;
-      --sun-500: #e0ae2a;
-      --sun-400: #f0c14b;
-      --sun-300: #f7d476;
-      --sun-200: #fbe6ab;
-      --sun-100: #fdf3d9;
+      /* Air Force Blue (#A2BECC) - the second block colour; side panels, highlights */
+      --sky-700: #3f6274;
+      --sky-600: #6a8fa1;
+      --sky-500: #86a7b8;
+      --sky-400: #a2becc;
+      --sky-300: #bccfd9;
+      --sky-200: #d5e2e8;
+      --sky-100: #e9f0f3;
 
       /* Surfaces */
-      --page: #2b1420;
-      --bg: #faf3f0;
+      --page: var(--plum-600);
+      --bg: #fbfcfd;
       --surface: var(--cream-50);
-      --sidebar: var(--cream-200);
-      --surface-soft: #f5eae6;
-      --surface-sunk: #f1e3df;
+      --sidebar: var(--sky-400);
+      --surface-soft: var(--cream-200);
+      --surface-sunk: var(--cream-300);
       --panel: var(--cream-50);
       --panel-soft: var(--plum-50);
       --input-bg: var(--cream-50);
 
       /* Ink */
       --text: var(--plum-900);
-      --muted: #806771;
-      --line: rgba(58, 28, 43, 0.10);
-      --line-strong: rgba(58, 28, 43, 0.20);
+      --muted: #524254;
+      --line: rgba(44, 29, 43, 0.12);
+      --line-strong: rgba(44, 29, 43, 0.22);
 
       /* Semantic */
       --danger: #b3243f;
       --success: #0f7a55;
-      --warning: var(--sun-700);
+      --warning: var(--sky-700);
 
       /* Radius scale */
       --r-card: 14px;
       --r-btn: 10px;
       --r-pill: 999px;
 
-      /* Elevation - warm-tinted, never pure black */
-      --shadow-sm: 0 1px 2px rgba(43, 20, 32, 0.05);
-      --shadow-md: 0 4px 16px rgba(43, 20, 32, 0.06);
-      --shadow-lg: 0 14px 40px rgba(43, 20, 32, 0.09);
+      /* Elevation - ink-tinted, never pure black */
+      --shadow-sm: 0 1px 2px rgba(44, 29, 43, 0.05);
+      --shadow-md: 0 4px 16px rgba(44, 29, 43, 0.06);
+      --shadow-lg: 0 14px 40px rgba(44, 29, 43, 0.09);
 
       /* Legacy aliases - kept so any stray rule still resolves */
       --purple: var(--plum-700);
@@ -929,12 +929,8 @@ def home():
       height: 100%;
       overflow: hidden;
       border-radius: 18px;
-      box-shadow: 0 22px 60px rgba(29, 11, 20, 0.38);
-      background:
-        radial-gradient(1000px 560px at 52% -6%, rgba(240, 193, 75, 0.13), transparent 62%),
-        radial-gradient(820px 620px at 104% 46%, rgba(224, 195, 207, 0.34), transparent 60%),
-        radial-gradient(760px 540px at -4% 82%, rgba(196, 150, 168, 0.20), transparent 62%),
-        var(--bg);
+      box-shadow: 0 22px 60px rgba(31, 20, 32, 0.28);
+      background: var(--bg);
     }
     .sidebar {
       padding: 22px;
@@ -954,8 +950,9 @@ def home():
       display: grid;
       place-items: center;
       border-radius: 12px;
-      background: linear-gradient(140deg, var(--plum-600), var(--plum-900));
-      box-shadow: 0 6px 16px rgba(77, 35, 56, 0.28);
+      background: var(--plum-600);
+      box-shadow: 0 6px 16px rgba(108, 71, 105, 0.24);
+      color: #fff;
       font-size: 1.6rem;
     }
     .brand strong { display: block; font-size: 1.1rem; color: var(--plum-900); }
@@ -966,13 +963,13 @@ def home():
       border-radius: var(--r-btn);
       padding: 14px 16px;
       color: #fff;
-      background: linear-gradient(135deg, var(--plum-700), var(--plum-900));
+      background: var(--plum-600);
       font-weight: 800;
       cursor: pointer;
-      box-shadow: 0 8px 20px rgba(45, 20, 33, 0.26);
+      box-shadow: 0 8px 20px rgba(44, 29, 43, 0.20);
     }
     .new-chat:hover, .primary-action:hover {
-      background: linear-gradient(135deg, var(--plum-600), var(--plum-800));
+      background: var(--plum-700);
     }
     .profile-field {
       margin-bottom: 16px;
@@ -1001,7 +998,7 @@ def home():
     }
     .profile-field input:focus {
       border-color: var(--plum-300);
-      box-shadow: 0 0 0 3px rgba(160, 106, 128, 0.18);
+      box-shadow: 0 0 0 3px rgba(131, 88, 127, 0.24);
     }
     .nav, .library { margin-top: 18px; }
     .nav-item, .library-item, .recent-item {
@@ -1106,7 +1103,7 @@ def home():
     .tab.active {
       color: #fff;
       font-weight: 700;
-      background: linear-gradient(135deg, var(--plum-700), var(--plum-900));
+      background: var(--plum-600);
     }
     .tab-view { display: none; }
     .tab-view.active {
@@ -1165,7 +1162,7 @@ def home():
       display: grid;
       place-items: center;
       border-radius: 50%;
-      background: linear-gradient(140deg, var(--plum-600), var(--plum-900));
+      background: var(--plum-600);
       flex: 0 0 auto;
     }
     .mode-pill {
@@ -1232,7 +1229,7 @@ def home():
     .mode-button:hover { background: rgba(255, 255, 255, 0.55); }
     .mode-button.active {
       color: #fff;
-      background: linear-gradient(135deg, var(--plum-700), var(--plum-900));
+      background: var(--plum-600);
     }
     .mode-button.active small { opacity: 0.8; }
     .send {
@@ -1241,12 +1238,12 @@ def home():
       border: 0;
       border-radius: 12px;
       color: #fff;
-      background: linear-gradient(135deg, var(--plum-700), var(--plum-900));
+      background: var(--plum-600);
       cursor: pointer;
       font-size: 1.2rem;
-      box-shadow: 0 8px 20px rgba(45, 20, 33, 0.28);
+      box-shadow: 0 8px 20px rgba(44, 29, 43, 0.22);
     }
-    .send:hover { background: linear-gradient(135deg, var(--plum-600), var(--plum-800)); }
+    .send:hover { background: var(--plum-700); }
     .send:disabled { opacity: 0.55; cursor: wait; }
     .rightbar {
       padding: 22px;
@@ -1274,7 +1271,7 @@ def home():
       height: 8px;
       border-radius: var(--r-pill);
       margin-top: 14px;
-      background: linear-gradient(90deg, var(--plum-800), var(--plum-500) 52%, var(--sun-400));
+      background: var(--plum-600);
     }
     .insight-grid {
       display: grid;
@@ -1352,7 +1349,7 @@ def home():
     .score-fill {
       height: 100%;
       border-radius: inherit;
-      background: linear-gradient(90deg, var(--plum-700), var(--sun-400));
+      background: var(--plum-600);
     }
     .empty-state {
       padding: 34px;
@@ -1381,7 +1378,7 @@ def home():
       border: 1px solid var(--line);
     }
     .conf-high { color: #0b5c40; background: #e6f5ee; border-color: #a6d9c5; }
-    .conf-medium { color: var(--sun-700); background: var(--sun-100); border-color: #eccf86; }
+    .conf-medium { color: var(--sky-700); background: var(--sky-100); border-color: var(--sky-300); }
     .conf-low { color: #8f1c33; background: #fbeaed; border-color: #eeb8c3; }
     .answer-warning {
       margin: 10px 0 0;
@@ -1418,7 +1415,7 @@ def home():
       white-space: pre-wrap;
     }
     mark {
-      background: var(--sun-300);
+      background: var(--sky-200);
       color: var(--plum-950);
       border-radius: 3px;
       padding: 0 2px;
