@@ -14,6 +14,6 @@ youtube-transcript-api>=0.6
 pillow>=10.0
 pytesseract>=0.3.10
 
-# Persistence / auth / observability (#1, #9, #10). Optional: the app runs
-# statelessly until SUPABASE_URL + SUPABASE_KEY are set.
-supabase>=2.0
+# Persistence / observability (#1, #9, #10) on Neon Postgres. Optional: the app
+# runs statelessly until DATABASE_URL is set.
+psycopg[binary]>=3.1
