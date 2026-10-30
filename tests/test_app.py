@@ -1,11 +1,15 @@
 """Tests for the FastAPI app's offline helpers (no Gemini API calls)."""
 
 from pathlib import Path
+from types import SimpleNamespace
 
+import src.app as app_module
 from src.app import (
     _document_signature,
+    build_document_index,
     build_rag_prompt,
     chunk_pages,
+    embed_texts,
     load_pdf_pages,
     retrieve_chunks,
 )
@@ -82,3 +86,56 @@ def test_load_pdf_pages_reads_sample_pdf():
     assert pages
     assert all(page["text"] for page in pages)
     assert pages[0]["source"] == "sample.pdf"
+
+
+class _FakeEmbeddings:
+    """Stands in for client.embeddings: records batch sizes, fails on request."""
+
+    def __init__(self, fail_on_call=None):
+        self.batch_sizes = []
+        self.fail_on_call = fail_on_call
+
+    def create(self, model, input):
+        self.batch_sizes.append(len(input))
+        if self.fail_on_call == len(self.batch_sizes):
+            raise RuntimeError("embedding API down")
+        # Returned out of order on purpose; each vector encodes its text.
+        data = [
+            SimpleNamespace(index=i, embedding=[float(text.split("-")[1])])
+            for i, text in enumerate(input)
+        ]
+        return SimpleNamespace(data=list(reversed(data)), usage=None)
+
+
+def _use_fake_client(monkeypatch, fake):
+    monkeypatch.setattr(
+        app_module, "get_openrouter_client", lambda: SimpleNamespace(embeddings=fake)
+    )
+
+
+def test_embed_texts_sends_batches_of_100_and_keeps_order(monkeypatch):
+    fake = _FakeEmbeddings()
+    _use_fake_client(monkeypatch, fake)
+
+    vectors = embed_texts([f"text-{i}" for i in range(250)])
+
+    assert fake.batch_sizes == [100, 100, 50]
+    assert vectors == [[float(i)] for i in range(250)]
+
+
+def test_embed_texts_returns_none_if_any_batch_fails(monkeypatch):
+    fake = _FakeEmbeddings(fail_on_call=2)
+    _use_fake_client(monkeypatch, fake)
+
+    assert embed_texts([f"text-{i}" for i in range(250)]) is None
+
+
+def test_document_index_falls_back_to_bm25_when_embeddings_fail(monkeypatch):
+    _use_fake_client(monkeypatch, _FakeEmbeddings(fail_on_call=1))
+    pages = [{"source": "notes.txt", "page": 1, "text": "alpha beta gamma delta " * 80}]
+
+    index = build_document_index([{"key": "bm25-fallback-test", "pages": pages}])
+
+    assert index["semantic"] is False
+    assert index["chunk_embeddings"] is None
+    assert retrieve_chunks("alpha gamma", index["chunks"], chunk_embeddings=None, top_k=2)

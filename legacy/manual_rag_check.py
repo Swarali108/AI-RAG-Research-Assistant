@@ -6,8 +6,9 @@ sys.path.append(str(project_root))
 
 from src.pdf_loader import load_pdf
 from src.chunking import recursive_chunking
-from src.embedding import EmbeddingModel
+from legacy.embedding import EmbeddingModel
 from src.vector_store import VectorStore
+from legacy.rag import RAGPipeline
 
 
 pdf_path = project_root / "docs" / "sample.pdf"
@@ -18,24 +19,21 @@ chunks = recursive_chunking(pages)
 texts = [chunk["text"] for chunk in chunks]
 
 embedding_model = EmbeddingModel()
-
 chunk_embeddings = embedding_model.embed_texts(texts)
 
-dimension = chunk_embeddings.shape[1]
-vector_store = VectorStore(dimension)
+vector_store = VectorStore(chunk_embeddings.shape[1])
 vector_store.add_embeddings(chunk_embeddings, chunks)
 
-query = "What is artificial intelligence?"
-query_embedding = embedding_model.embed_query(query)
+rag = RAGPipeline(embedding_model, vector_store)
 
-results = vector_store.search(query_embedding, top_k=3)
+question = "What is artificial intelligence?"
+result = rag.ask(question)
 
-print(f"Query: {query}")
-print(f"Results found: {len(results)}")
+print("Question:", question)
+print("\nAnswer:")
+print(result["answer"])
 
-for result in results:
-    print("\nScore:", result["score"])
-    print("Page:", result["page"])
-    print("Chunk ID:", result["chunk_id"])
-    print("Text:", result["text"][:500])
+print("\nCitations:")
+for citation in result["citations"]:
+    print(citation)
     

@@ -6,7 +6,7 @@ sys.path.append(str(project_root))
 
 from src.pdf_loader import load_pdf
 from src.chunking import recursive_chunking
-from src.embedding import EmbeddingModel
+from legacy.embedding import EmbeddingModel
 
 
 pdf_path = project_root / "docs" / "sample.pdf"

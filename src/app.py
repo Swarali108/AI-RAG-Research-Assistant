@@ -106,9 +106,11 @@ OPENROUTER_HEADERS = {
 # Set OPENROUTER_MAX_OUTPUT_TOKENS to reintroduce a ceiling if costs need reining in.
 _max_output_env = os.getenv("OPENROUTER_MAX_OUTPUT_TOKENS", "").strip()
 GENERATION_MAX_TOKENS = int(_max_output_env) if _max_output_env else None
-# Skip semantic embeddings for very large documents (fall back to free BM25),
-# so a huge PDF can't rack up embedding costs on every question.
-MAX_EMBED_CHUNKS = int(os.getenv("MAX_EMBED_CHUNKS", "250"))
+# Skip semantic embeddings above this many chunks (fall back to free BM25).
+# 3000 chunks ≈ 1,000 pages ≈ 900k tokens ≈ $0.02, paid once per document (cached).
+MAX_EMBED_CHUNKS = int(os.getenv("MAX_EMBED_CHUNKS", "3000"))
+# Texts per embeddings request; embed_texts splits larger inputs into batches.
+EMBED_BATCH_SIZE = 100
 
 # --- Explain-Like modes (#13): pure prompt engineering, no extra LLM cost ---
 MODES: Dict[str, Dict[str, Any]] = {
@@ -287,13 +289,23 @@ def embed_texts(texts: List[str], task_type: Optional[str] = None) -> Optional[L
     if not texts:
         return []
 
+    # Batched so large documents stay under per-request input limits. All or
+    # nothing: if any batch fails, return None rather than a partial list that
+    # would no longer line up one-to-one with the chunks.
+    embeddings: List[List[float]] = []
     try:
         client = get_openrouter_client()
-        response = client.embeddings.create(model=EMBEDDING_MODEL, input=texts)
-        usage = getattr(response, "usage", None)
-        if usage is not None:
-            METRICS["embedding_tokens"] += getattr(usage, "total_tokens", 0) or 0
-        return [item.embedding for item in response.data]
+        for start in range(0, len(texts), EMBED_BATCH_SIZE):
+            batch = texts[start : start + EMBED_BATCH_SIZE]
+            response = client.embeddings.create(model=EMBEDDING_MODEL, input=batch)
+            usage = getattr(response, "usage", None)
+            if usage is not None:
+                METRICS["embedding_tokens"] += getattr(usage, "total_tokens", 0) or 0
+            data = sorted(response.data, key=lambda item: item.index)
+            if len(data) != len(batch):
+                return None
+            embeddings.extend(item.embedding for item in data)
+        return embeddings
     except Exception:
         return None
 
@@ -429,7 +441,7 @@ def build_document_index(sources: List[Dict[str, Any]]) -> Dict[str, Any]:
     chunks = chunk_pages(pages)
 
     # Cost guard: only embed documents up to MAX_EMBED_CHUNKS; larger ones use
-    # BM25-only retrieval (free) instead of paying to embed hundreds of chunks.
+    # BM25-only retrieval (free) instead of paying to embed thousands of chunks.
     if len(chunks) <= MAX_EMBED_CHUNKS:
         chunk_embeddings = embed_texts(
             [chunk["text"] for chunk in chunks], task_type="RETRIEVAL_DOCUMENT"
