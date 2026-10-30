@@ -5,8 +5,7 @@ def clean_text(value, max_chars=500):
     if not value:
         return ""
 
-    text = str(value)
-    text = text.replace("\x00", " ")
+    text = str(value).replace("\x00", " ")
     text = " ".join(text.split())
 
     return text[:max_chars]
@@ -18,9 +17,9 @@ def search_web(query, max_results=3):
     try:
         with DDGS() as ddgs:
             for item in ddgs.text(query, max_results=max_results):
-                title = clean_text(item.get("title", "Untitled"), max_chars=120)
-                url = clean_text(item.get("href") or item.get("url", ""), max_chars=250)
-                snippet = clean_text(item.get("body") or item.get("snippet", ""), max_chars=500)
+                title = clean_text(item.get("title", "Untitled"), max_chars=140)
+                url = clean_text(item.get("href") or item.get("url", ""), max_chars=260)
+                snippet = clean_text(item.get("body") or item.get("snippet", ""), max_chars=600)
 
                 if title or snippet:
                     results.append({
