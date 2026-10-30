@@ -74,7 +74,16 @@ def _image_ocr(data: bytes, source: str) -> List[Dict[str, Any]]:
             "Image OCR needs pillow + pytesseract and the Tesseract binary installed."
         ) from exc
 
-    text = pytesseract.image_to_string(Image.open(io.BytesIO(data)))
+    from PIL import UnidentifiedImageError
+
+    try:
+        text = pytesseract.image_to_string(Image.open(io.BytesIO(data)))
+    except UnidentifiedImageError as exc:
+        raise RuntimeError("the file isn't a readable image.") from exc
+    except pytesseract.TesseractNotFoundError as exc:
+        # Python packages install fine on serverless hosts, but the Tesseract
+        # binary usually isn't there (e.g. Vercel).
+        raise RuntimeError("image text recognition (OCR) isn't available on this server.") from exc
     page = _page(source, text)
     if not page["text"].strip():
         raise RuntimeError(f"No text could be read from image {source}.")
@@ -130,6 +139,20 @@ def html_to_text(html: str) -> str:
     return _normalize("".join(parser.parts))
 
 
+def _tls_context():
+    """Verify HTTPS with certifi's CA bundle when available. Some Python installs
+    (notably on Windows) have no usable system bundle, so every https URL would
+    fail with CERTIFICATE_VERIFY_FAILED. certifi ships with the openai/httpx deps."""
+    import ssl
+
+    try:
+        import certifi
+
+        return ssl.create_default_context(cafile=certifi.where())
+    except ImportError:
+        return ssl.create_default_context()
+
+
 def extract_url(url: str, timeout: int = 15, max_chars: int = 200_000) -> List[Dict[str, Any]]:
     """Fetch a web page and extract readable text (stdlib only)."""
     import urllib.request
@@ -138,7 +161,7 @@ def extract_url(url: str, timeout: int = 15, max_chars: int = 200_000) -> List[D
         raise ValueError("URL must start with http:// or https://")
 
     request = urllib.request.Request(url, headers={"User-Agent": "AI-RAG-Research-Assistant/1.0"})
-    with urllib.request.urlopen(request, timeout=timeout) as response:  # noqa: S310 (user-provided URL)
+    with urllib.request.urlopen(request, timeout=timeout, context=_tls_context()) as response:  # noqa: S310 (user-provided URL)
         charset = response.headers.get_content_charset() or "utf-8"
         html = response.read(max_chars * 4).decode(charset, errors="replace")
 

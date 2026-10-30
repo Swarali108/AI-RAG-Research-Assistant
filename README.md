@@ -1,6 +1,6 @@
-# AI RAG Research Assistant
+# Researchly: AI RAG Research Assistant
 
-A source-grounded AI research assistant. Upload PDFs, ask questions, and get answers with citations, retrieval scores, and a live "RAG Inspector" that shows exactly how each answer was produced.
+A source-grounded AI research assistant. Upload documents, links, videos or pasted text, ask questions, and get answers with page-level citations, retrieval scores, and a live "RAG Inspector" that shows exactly how each answer was produced.
 
 ## Project Overview
 
@@ -23,7 +23,17 @@ Unlike a generic chatbot, this assistant answers from your uploaded documents an
 - **Smart, document-aware follow-up suggestions** (generated from retrieval, no extra LLM cost)
 - **In-app observability** (`/api/metrics`): per-request latency, token usage, estimated cost, and session fallback rate
 - **RAG Inspector** UI: query terms, retrieved chunks with similarity scores, matched terms, confidence, request metrics, and the full prompt sent to the model
-- Single-page UI served directly by the backend — no separate frontend build
+- Single-page UI served by the backend from [`src/static/`](src/static/) (vanilla JS, no build step)
+
+### The interface
+
+- **Three-panel workspace** (dark theme, collapsible side panels, drawers on mobile): chats on the left, the conversation in the center, knowledge and insights on the right
+- **Markdown answers** (headings, lists, tables, code), sanitized with DOMPurify because answers quote document and web text
+- **Clickable source chips** under every answer, e.g. `Understanding_LLMs.pdf (p. 6)`, which open the exact passage used
+- **Knowledge panel**: drag-and-drop upload, Add URL, YouTube and Paste Text, with per-source status (Processing, Ready or Failed), pages and chunks
+- **Key topics and suggested questions** generated from your documents: one small LLM call per document set, with a free keyphrase extractor as fallback
+- **Resilient ingestion**: one unreadable file (e.g. an image when OCR isn't installed) is skipped with a clear warning, and the answer still comes from the files that worked
+- **Chats**: search, rename, delete, relative times, reopen with full context; Saved Research, thumbs feedback, regenerate, export to Markdown or PDF
 
 ## Production-grade capabilities
 
@@ -39,13 +49,14 @@ This project also demonstrates the wider AI-engineering stack — RAG, agents, e
 | **Persistence** | Neon Postgres profiles, saved documents/chats, pgvector embeddings, persisted metrics — graceful no-op until configured | [`src/storage.py`](src/storage.py), [`db/schema.sql`](db/schema.sql) |
 | **Observability** | Per-request latency, tokens, est. cost, fallback/route | `GET /api/metrics` |
 
-> **Budget posture:** routing, reranking, confidence, follow-ups, and retrieval-metric evaluation add **zero** per-request LLM cost. The only paid LLM calls are embeddings + answer generation (and, opt-in, judge-based eval). See [docs/DATABASE_SETUP.md](docs/DATABASE_SETUP.md) to enable persistence.
+> **Budget posture:** routing, reranking, confidence, follow-ups, and retrieval-metric evaluation add **zero** per-request LLM cost. The paid LLM calls are embeddings, answer generation, one small topics-and-questions call per document set (~$0.0003, cached), and opt-in judge-based eval. See [docs/DATABASE_SETUP.md](docs/DATABASE_SETUP.md) to enable persistence.
 
 ### Key API endpoints
 
 | Endpoint | Purpose |
 | --- | --- |
-| `POST /api/research/stream` | Streamed answer (SSE) — accepts files, `url`, `youtube_url`, `use_web`, `history` |
+| `POST /api/research/stream` | Streamed answer (SSE) — accepts files, `url`, `youtube_url` (each may repeat), `use_web`, `history` |
+| `POST /api/sources/analyze` | Index sources and report per-source status, pages and chunks, plus key topics and suggested questions |
 | `POST /api/research` | Non-streamed answer with full trace |
 | `GET /api/eval?k=4&judge=false` | Run the bundled evaluation set |
 | `GET /api/metrics` | Session observability counters |
@@ -65,7 +76,7 @@ PDF Upload (multipart)
   -> anthropic/claude-haiku-5.5 via OpenRouter (streamed) -> Answer + Citations
 ```
 
-Retrieval and ranking logic lives in [`src/retrieval.py`](src/retrieval.py) (pure, dependency-light, unit-tested). The FastAPI app, embedding integration, caching, and UI live in [`src/app.py`](src/app.py).
+Retrieval and ranking logic lives in [`src/retrieval.py`](src/retrieval.py) (pure, dependency-light, unit-tested). The FastAPI app, embedding integration and caching live in [`src/app.py`](src/app.py); topic and question generation in [`src/insights.py`](src/insights.py); the UI in [`src/static/`](src/static/).
 
 ## Running Locally
 
@@ -97,7 +108,7 @@ Then open http://127.0.0.1:8000.
 | `MAX_UPLOAD_MB` | no | Per-file upload size limit in MB (default `15`) |
 | `DATABASE_URL` | no | Neon Postgres connection string; enables persistent workspaces, pgvector, and persisted metrics (see [docs/DATABASE_SETUP.md](docs/DATABASE_SETUP.md)) |
 
-> **Cost note:** with the default models, embedding a document costs a fraction of a cent (and is cached), and each answer is well under a cent — a $1 OpenRouter budget covers thousands of questions. If embeddings ever fail, retrieval automatically falls back to BM25-only so the app keeps working.
+> **Cost note:** with the default models, embedding a document costs a fraction of a cent (and is cached), and each answer is well under a cent — a $1 OpenRouter budget covers several hundred questions. If embeddings ever fail, retrieval automatically falls back to BM25-only so the app keeps working.
 
 ## Testing
 

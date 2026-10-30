@@ -1,7 +1,12 @@
 """Tests for the FastAPI app's offline helpers (no Gemini API calls)."""
 
+import asyncio
+import io
 from pathlib import Path
 from types import SimpleNamespace
+
+import pytest
+from fastapi import HTTPException, UploadFile
 
 import src.app as app_module
 from src.app import (
@@ -10,6 +15,7 @@ from src.app import (
     build_rag_prompt,
     chunk_pages,
     embed_texts,
+    gather_sources,
     load_pdf_pages,
     retrieve_chunks,
 )
@@ -139,3 +145,38 @@ def test_document_index_falls_back_to_bm25_when_embeddings_fail(monkeypatch):
     assert index["semantic"] is False
     assert index["chunk_embeddings"] is None
     assert retrieve_chunks("alpha gamma", index["chunks"], chunk_embeddings=None, top_k=2)
+
+
+def test_unreadable_file_is_skipped_with_a_warning(monkeypatch):
+    _use_fake_client(monkeypatch, _FakeEmbeddings(fail_on_call=1))
+    good = {"filename": "notes.txt", "bytes": b"alpha beta gamma delta " * 80}
+    broken = {"filename": "scan.png", "bytes": b"not really an image"}
+
+    index = build_document_index([good, broken])
+
+    assert {chunk["source"] for chunk in index["chunks"]} == {"notes.txt"}
+    assert [w["source"] for w in index["warnings"]] == ["scan.png"]
+
+
+def test_request_fails_only_when_no_source_is_readable():
+    broken = {"filename": "scan.png", "bytes": b"still not an image"}
+
+    with pytest.raises(HTTPException) as caught:
+        build_document_index([broken])
+
+    assert caught.value.status_code == 400
+    assert "scan.png" in caught.value.detail
+
+
+def test_gather_sources_skips_unsupported_and_oversized_files(monkeypatch):
+    monkeypatch.setattr(app_module, "MAX_UPLOAD_BYTES", 10)
+    uploads = [
+        UploadFile(file=io.BytesIO(b"tiny"), filename="ok.txt"),
+        UploadFile(file=io.BytesIO(b"x"), filename="slides.pptx"),
+        UploadFile(file=io.BytesIO(b"way more than ten bytes"), filename="big.txt"),
+    ]
+
+    sources, warnings = asyncio.run(gather_sources(uploads))
+
+    assert [s["filename"] for s in sources] == ["ok.txt"]
+    assert [w["source"] for w in warnings] == ["slides.pptx", "big.txt"]
