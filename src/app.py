@@ -11,6 +11,7 @@ from dotenv import load_dotenv
 from fastapi import Depends, FastAPI, File, Form, Header, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse, StreamingResponse
+from fastapi.staticfiles import StaticFiles
 from openai import NOT_GIVEN, OpenAI
 from pydantic import BaseModel
 
@@ -42,6 +43,13 @@ try:
     )
     from src.router import route_question, web_search
     from src.memory import format_history, has_history
+    from src.insights import (
+        build_insights,
+        build_insights_prompt,
+        extract_keyphrases,
+        parse_insights,
+        sample_excerpts,
+    )
 except ImportError:
     from ingestion import (
         SUPPORTED_UPLOAD_EXTENSIONS,
@@ -51,6 +59,13 @@ except ImportError:
     )
     from router import route_question, web_search
     from memory import format_history, has_history
+    from insights import (
+        build_insights,
+        build_insights_prompt,
+        extract_keyphrases,
+        parse_insights,
+        sample_excerpts,
+    )
 
 try:
     from src.storage import store
@@ -416,6 +431,21 @@ def _document_signature(sources: List[Dict[str, Any]]) -> str:
     return hasher.hexdigest()
 
 
+class NoReadableSources(HTTPException):
+    """400 raised when nothing could be extracted; keeps the per-source reasons."""
+
+    def __init__(self, warnings: List[Dict[str, str]]):
+        super().__init__(status_code=400, detail=_no_readable_sources_message(warnings))
+        self.warnings = warnings
+
+
+def _no_readable_sources_message(warnings: List[Dict[str, str]]) -> str:
+    if not warnings:
+        return "No readable text was found in the provided sources."
+    skipped = "; ".join(f"{w['source']}: {w['message']}" for w in warnings)
+    return f"None of your sources could be read. {skipped}"
+
+
 def build_document_index(sources: List[Dict[str, Any]]) -> Dict[str, Any]:
     """Parse, chunk, and embed the input sources once, caching by content hash.
     Each source is either an uploaded file ({"filename","bytes"}) or a set of
@@ -425,18 +455,31 @@ def build_document_index(sources: List[Dict[str, Any]]) -> Dict[str, Any]:
     if cached is not None:
         return cached
 
+    # One unreadable file must not sink the request: skip it, record why, and
+    # answer from whatever did extract.
     pages = []
+    warnings: List[Dict[str, str]] = []
+    source_pages: Dict[str, int] = {}  # per-source page counts, for the sources panel
     for source in sources:
-        if "bytes" in source:
-            pages.extend(extract_pages(source["filename"], source["bytes"]))
+        if "bytes" not in source:
+            source_items = source.get("pages", [])
         else:
-            pages.extend(source.get("pages", []))
+            try:
+                source_items = extract_pages(source["filename"], source["bytes"])
+            except Exception as error:
+                warnings.append({"source": source["filename"], "message": str(error) or "could not be read."})
+                continue
+            if not source_items:
+                warnings.append({
+                    "source": source["filename"],
+                    "message": "no readable text was found (a scanned PDF needs OCR).",
+                })
+        for page in source_items:
+            source_pages[page["source"]] = source_pages.get(page["source"], 0) + 1
+        pages.extend(source_items)
 
     if not pages:
-        raise HTTPException(
-            status_code=400,
-            detail="No readable text was found in the uploaded PDFs.",
-        )
+        raise NoReadableSources(warnings)
 
     chunks = chunk_pages(pages)
 
@@ -454,6 +497,8 @@ def build_document_index(sources: List[Dict[str, Any]]) -> Dict[str, Any]:
         "chunks": chunks,
         "chunk_embeddings": chunk_embeddings,
         "semantic": chunk_embeddings is not None,
+        "warnings": warnings,
+        "source_pages": source_pages,
     }
 
     # Simple FIFO bound so a long-lived process does not grow without limit.
@@ -631,6 +676,7 @@ def prepare_rag_trace(
     use_web: bool = False,
     history_summary: str = "",
     has_history: bool = False,
+    source_warnings: Optional[List[Dict[str, str]]] = None,
 ):
     index = build_document_index(files_payload)
     chunks = index["chunks"]
@@ -677,6 +723,8 @@ def prepare_rag_trace(
         "web_results": web_results,
         "pages_processed": index["pages"],
         "chunks_processed": len(chunks),
+        # Sources skipped before indexing (type/size/URL) + files that failed to extract.
+        "warnings": (source_warnings or []) + index.get("warnings", []),
         "retrieved_chunks": citations,
         "confidence": confidence,
         "prompt": prompt,
@@ -834,1498 +882,27 @@ def serialize_event(event: str, data: Dict[str, Any]):
     return f"event: {event}\ndata: {json.dumps(data)}\n\n"
 
 
+# The single-page UI lives in src/static (index.html, styles.css, app.js); no build step.
+STATIC_DIR = Path(__file__).resolve().parent / "static"
+app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
+
+
+def _asset_version() -> str:
+    """Content hash of the CSS/JS so a deploy never serves stale cached assets."""
+    digest = hashlib.sha256()
+    for name in ("styles.css", "app.js"):
+        digest.update((STATIC_DIR / name).read_bytes())
+    return digest.hexdigest()[:10]
+
+
+INDEX_HTML = (STATIC_DIR / "index.html").read_text(encoding="utf-8").replace(
+    "{{ASSET_VERSION}}", _asset_version()
+)
+
+
 @app.get("/", response_class=HTMLResponse)
 def home():
-    return HTMLResponse(
-        """
-<!doctype html>
-<html lang="en">
-<head>
-  <meta charset="utf-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>AI RAG Research Assistant</title>
-  <style>
-    :root {
-      color-scheme: light;
-
-      /* Old Lavender (#83587F) - the brand block colour; buttons, frame, accents */
-      --plum-950: #1f1420;
-      --plum-900: #2c1d2b;
-      --plum-800: #43293f;
-      --plum-700: #6c4769;
-      --plum-600: #83587f;
-      --plum-500: #96718f;
-      --plum-400: #b293ad;
-      --plum-300: #ccb5c8;
-      --plum-200: #e2d4df;
-      --plum-100: #f0e8ee;
-      --plum-50:  #f8f4f7;
-
-      /* Cool neutrals - the reading ground */
-      --cream-50:  #ffffff;
-      --cream-100: #fafbfc;
-      --cream-200: #f3f6f8;
-      --cream-300: #e9eff2;
-      --cream-400: #dde6eb;
-
-      /* Air Force Blue (#A2BECC) - the second block colour; side panels, highlights */
-      --sky-700: #3f6274;
-      --sky-600: #6a8fa1;
-      --sky-500: #86a7b8;
-      --sky-400: #a2becc;
-      --sky-300: #bccfd9;
-      --sky-200: #d5e2e8;
-      --sky-100: #e9f0f3;
-
-      /* Surfaces */
-      --page: var(--sky-400);
-      --bg: #ffffff;
-      --surface: var(--cream-50);
-      --sidebar: var(--plum-600);
-      --rightbar: var(--sky-100);
-      --surface-soft: var(--cream-200);
-      --surface-sunk: var(--cream-300);
-      --panel: var(--cream-50);
-      --panel-soft: var(--plum-50);
-      --input-bg: var(--cream-50);
-
-      /* Ink */
-      --text: var(--plum-900);
-      --muted: #524254;
-      --line: rgba(44, 29, 43, 0.12);
-      --line-strong: rgba(44, 29, 43, 0.22);
-
-      /* Semantic */
-      --danger: #b3243f;
-      --success: #0f7a55;
-      --warning: var(--sky-700);
-
-      /* Radius scale */
-      --r-card: 14px;
-      --r-btn: 10px;
-      --r-pill: 999px;
-
-      /* Elevation - ink-tinted, never pure black */
-      --shadow-sm: 0 1px 2px rgba(44, 29, 43, 0.05);
-      --shadow-md: 0 4px 16px rgba(44, 29, 43, 0.06);
-      --shadow-lg: 0 14px 40px rgba(44, 29, 43, 0.09);
-
-      /* Legacy aliases - kept so any stray rule still resolves */
-      --purple: var(--plum-700);
-      --pink: var(--plum-400);
-      --cyan: var(--plum-600);
-      --blue: var(--plum-500);
-      --green: var(--success);
-      --orchid-700: var(--plum-700);
-      --orchid-900: var(--plum-900);
-    }
-    * { box-sizing: border-box; }
-    body {
-      margin: 0;
-      height: 100vh;
-      padding: 14px;
-      overflow: hidden;
-      font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
-      background: var(--page);
-      color: var(--text);
-    }
-    button, input, textarea, select { font: inherit; }
-    .app-shell {
-      display: grid;
-      grid-template-columns: 320px minmax(0, 1fr) 360px;
-      height: 100%;
-      overflow: hidden;
-      border-radius: 18px;
-      box-shadow: 0 24px 60px rgba(63, 98, 116, 0.30);
-      background: var(--bg);
-    }
-    .sidebar {
-      --text: #ffffff;
-      --muted: rgba(255, 255, 255, 0.86);
-      --line: rgba(255, 255, 255, 0.22);
-      padding: 22px;
-      color: var(--text);
-      background: var(--sidebar);
-      overflow-y: auto;
-    }
-    .brand {
-      display: flex;
-      align-items: center;
-      gap: 12px;
-      margin-bottom: 18px;
-    }
-    .spark {
-      width: 44px;
-      height: 44px;
-      display: grid;
-      place-items: center;
-      border-radius: 12px;
-      background: #fff;
-      box-shadow: 0 6px 16px rgba(31, 20, 32, 0.18);
-      color: var(--plum-600);
-      font-size: 1.6rem;
-    }
-    .brand strong { display: block; font-size: 1.1rem; color: var(--text); }
-    .brand span, .muted { color: var(--muted); }
-    .new-chat, .primary-action {
-      width: 100%;
-      border: 0;
-      border-radius: var(--r-btn);
-      padding: 14px 16px;
-      color: #fff;
-      background: var(--plum-600);
-      font-weight: 800;
-      cursor: pointer;
-      box-shadow: 0 8px 20px rgba(44, 29, 43, 0.20);
-    }
-    .new-chat:hover, .primary-action:hover {
-      background: var(--plum-700);
-    }
-    .new-chat {
-      color: var(--plum-700);
-      background: #fff;
-      box-shadow: 0 8px 20px rgba(31, 20, 32, 0.18);
-    }
-    .new-chat:hover { background: var(--sky-100); }
-    .profile-field {
-      margin-bottom: 16px;
-      padding: 12px;
-      border: 1px solid var(--line);
-      border-radius: var(--r-card);
-      background: rgba(255, 255, 255, 0.12);
-    }
-    .profile-field label {
-      display: block;
-      margin-bottom: 8px;
-      color: var(--muted);
-      font-size: 0.82rem;
-      font-weight: 700;
-      text-transform: uppercase;
-      letter-spacing: 0.04em;
-    }
-    .profile-field input {
-      width: 100%;
-      border: 1px solid var(--line);
-      border-radius: var(--r-btn);
-      padding: 10px 11px;
-      color: var(--plum-900);
-      background: var(--input-bg);
-      outline: none;
-    }
-    .profile-field input:focus {
-      border-color: var(--plum-300);
-      box-shadow: 0 0 0 3px rgba(131, 88, 127, 0.24);
-    }
-    .nav, .library { margin-top: 18px; }
-    .nav-item, .library-item, .recent-item {
-      display: flex;
-      align-items: center;
-      gap: 10px;
-      width: 100%;
-      border: 1px solid transparent;
-      border-radius: var(--r-btn);
-      padding: 11px 12px;
-      color: var(--text);
-      background: transparent;
-      text-align: left;
-      cursor: pointer;
-    }
-    .nav-item:hover, .library-item:hover, .recent-item:hover {
-      background: rgba(255, 255, 255, 0.12);
-    }
-    .nav-item.active, .library-item.active, .recent-item.active {
-      font-weight: 700;
-      background: rgba(255, 255, 255, 0.22);
-    }
-    .section-label {
-      margin: 18px 0 10px;
-      color: var(--muted);
-      font-size: 0.78rem;
-      letter-spacing: 0.05em;
-      text-transform: uppercase;
-    }
-    .main {
-      padding: 22px 34px 24px;
-      min-width: 0;
-      height: 100%;
-      display: flex;
-      flex-direction: column;
-      overflow: hidden;
-    }
-    .topbar {
-      display: flex;
-      align-items: center;
-      justify-content: space-between;
-      gap: 16px;
-      margin-bottom: 12px;
-    }
-    h1 {
-      margin: 0 0 10px;
-      font-size: clamp(1.9rem, 4vw, 2.65rem);
-      line-height: 1;
-      letter-spacing: -0.01em;
-      color: var(--plum-900);
-    }
-    .subtitle { margin: 0; font-size: 1rem; color: var(--muted); }
-    .share {
-      border: 1px solid var(--line);
-      border-radius: var(--r-btn);
-      padding: 9px 13px;
-      color: var(--plum-800);
-      background: var(--surface);
-      box-shadow: var(--shadow-sm);
-      cursor: pointer;
-    }
-    .share:hover { background: var(--sky-100); border-color: var(--sky-300); }
-    .quick-grid {
-      display: grid;
-      grid-template-columns: repeat(4, minmax(0, 1fr));
-      gap: 12px;
-      margin: 14px 0;
-      flex: 0 0 auto;
-    }
-    .quick-card, .panel, .inspector-panel {
-      border: 1px solid var(--line);
-      border-radius: var(--r-card);
-      background: var(--panel);
-      box-shadow: var(--shadow-md);
-    }
-    .quick-card { padding: 12px 14px; min-height: 64px; }
-    .quick-card strong { display: block; margin-bottom: 5px; font-size: 0.95rem; }
-    .quick-card span { color: var(--muted); font-size: 0.84rem; }
-    .tab-bar {
-      display: inline-grid;
-      grid-template-columns: repeat(2, 1fr);
-      gap: 4px;
-      padding: 5px;
-      border: 1px solid var(--line);
-      border-radius: var(--r-btn);
-      background: var(--sky-100);
-      margin-bottom: 10px;
-      flex: 0 0 auto;
-      width: max-content;
-    }
-    .tab {
-      border: 0;
-      border-radius: 7px;
-      padding: 9px 18px;
-      color: var(--plum-800);
-      background: transparent;
-      cursor: pointer;
-    }
-    .tab:hover { color: var(--plum-900); }
-    .tab.active {
-      color: #fff;
-      font-weight: 700;
-      background: var(--plum-600);
-    }
-    .tab-view { display: none; }
-    .tab-view.active {
-      min-height: 0;
-    }
-    #chatTab.tab-view.active {
-      display: flex;
-      flex: 1 1 auto;
-      overflow: hidden;
-    }
-    #inspectorTab.tab-view.active {
-      display: block;
-      flex: 1 1 auto;
-      overflow-y: auto;
-      padding-right: 6px;
-    }
-    .chat-panel {
-      padding: 18px;
-      min-height: 0;
-      flex: 1 1 auto;
-      width: 100%;
-      display: flex;
-      flex-direction: column;
-      overflow: hidden;
-    }
-    #messages {
-      flex: 1 1 auto;
-      min-height: 0;
-      overflow-y: auto;
-      padding-right: 8px;
-      scroll-behavior: smooth;
-    }
-    .message-row {
-      display: flex;
-      gap: 14px;
-      margin: 20px 0;
-    }
-    .message-row.user { justify-content: flex-end; }
-    .bubble {
-      max-width: min(760px, 88%);
-      border: 1px solid var(--line);
-      border-radius: var(--r-card);
-      padding: 18px;
-      line-height: 1.65;
-      white-space: pre-wrap;
-      background: var(--surface);
-      box-shadow: var(--shadow-sm);
-    }
-    .bubble.user {
-      color: #fff;
-      border-color: var(--plum-600);
-      background: var(--plum-600);
-    }
-    .bot-face {
-      width: 48px;
-      height: 48px;
-      display: grid;
-      place-items: center;
-      border-radius: 50%;
-      background: var(--plum-600);
-      flex: 0 0 auto;
-    }
-    .mode-pill {
-      display: inline-flex;
-      align-items: center;
-      gap: 8px;
-      margin-bottom: 12px;
-      border-radius: var(--r-pill);
-      padding: 7px 12px;
-      color: var(--sky-700);
-      background: var(--sky-100);
-      border: 1px solid var(--sky-300);
-      font-weight: 700;
-      font-size: 0.9rem;
-    }
-    .composer {
-      margin-top: 20px;
-      border: 1px solid var(--line);
-      border-radius: var(--r-card);
-      padding: 16px;
-      background: var(--surface);
-      box-shadow: var(--shadow-md);
-      flex: 0 0 auto;
-    }
-    .composer:focus-within { border-color: var(--plum-300); }
-    textarea {
-      width: 100%;
-      min-height: 88px;
-      resize: vertical;
-      border: 0;
-      outline: none;
-      color: var(--text);
-      background: transparent;
-      line-height: 1.5;
-    }
-    textarea::placeholder { color: var(--muted); }
-    .composer-actions {
-      display: flex;
-      justify-content: space-between;
-      gap: 14px;
-      align-items: center;
-    }
-    .mode-toggle {
-      display: grid;
-      grid-template-columns: repeat(3, 1fr);
-      gap: 6px;
-      width: min(620px, 100%);
-      padding: 6px;
-      border: 1px solid var(--line);
-      border-radius: var(--r-card);
-      background: var(--sky-100);
-    }
-    .mode-button {
-      border: 0;
-      border-radius: 8px;
-      padding: 9px 8px;
-      color: var(--plum-800);
-      background: transparent;
-      cursor: pointer;
-      font-size: 0.82rem;
-      line-height: 1.2;
-    }
-    .mode-button small { opacity: 0.72; font-size: 0.72rem; }
-    .mode-button:hover { background: #fff; }
-    .mode-button.active {
-      color: #fff;
-      background: var(--plum-600);
-    }
-    .mode-button.active small { opacity: 0.8; }
-    .send {
-      width: 54px;
-      height: 48px;
-      border: 0;
-      border-radius: 12px;
-      color: #fff;
-      background: var(--plum-600);
-      cursor: pointer;
-      font-size: 1.2rem;
-      box-shadow: 0 8px 20px rgba(44, 29, 43, 0.22);
-    }
-    .send:hover { background: var(--plum-700); }
-    .send:disabled { opacity: 0.55; cursor: wait; }
-    .rightbar {
-      padding: 22px;
-      background: var(--rightbar);
-      overflow-y: auto;
-    }
-    .doc-card, .side-card {
-      border: 1px solid var(--line);
-      border-radius: var(--r-card);
-      padding: 18px;
-      background: var(--surface);
-      box-shadow: var(--shadow-sm);
-      margin-bottom: 16px;
-    }
-    .file-input {
-      width: 100%;
-      border: 1px solid var(--sky-300);
-      border-radius: var(--r-btn);
-      padding: 12px;
-      color: var(--plum-800);
-      background: var(--sky-100);
-    }
-    .progress {
-      height: 8px;
-      border-radius: var(--r-pill);
-      margin-top: 14px;
-      background: var(--plum-600);
-    }
-    .insight-grid {
-      display: grid;
-      grid-template-columns: repeat(3, 1fr);
-      gap: 10px;
-      margin: 14px 0;
-    }
-    .metric {
-      padding: 12px;
-      border-radius: var(--r-btn);
-      background: var(--sky-100);
-    }
-    .metric strong { display: block; font-size: 1.4rem; color: var(--plum-600); }
-    .metric span { color: var(--muted); font-size: 0.82rem; }
-    .topic-list, .question-list {
-      display: flex;
-      flex-wrap: wrap;
-      gap: 8px;
-    }
-    .topic {
-      border-radius: var(--r-pill);
-      padding: 8px 13px;
-      color: var(--sky-700);
-      background: var(--sky-200);
-      font-size: 0.84rem;
-    }
-    .suggestion {
-      width: 100%;
-      border: 1px solid var(--line);
-      border-radius: var(--r-btn);
-      padding: 12px;
-      color: var(--text);
-      background: var(--surface);
-      text-align: left;
-      cursor: pointer;
-    }
-    .suggestion:hover { border-color: var(--sky-300); background: var(--sky-100); }
-    .inspector-grid {
-      display: grid;
-      grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
-      gap: 14px;
-    }
-    .inspector-panel {
-      padding: 18px;
-      min-height: 160px;
-    }
-    .inspector-panel.full { grid-column: 1 / -1; }
-    pre {
-      overflow: auto;
-      max-height: 340px;
-      padding: 14px;
-      border-radius: var(--r-btn);
-      border: 1px solid var(--line);
-      background: var(--cream-200);
-      color: var(--plum-900);
-      white-space: pre-wrap;
-      line-height: 1.45;
-    }
-    .score-row {
-      margin: 12px 0;
-      padding: 12px;
-      border: 1px solid var(--line);
-      border-radius: var(--r-btn);
-      background: var(--surface);
-    }
-    .score-track {
-      height: 7px;
-      border-radius: var(--r-pill);
-      background: var(--surface-sunk);
-      overflow: hidden;
-      margin-top: 8px;
-    }
-    .score-fill {
-      height: 100%;
-      border-radius: inherit;
-      background: var(--plum-600);
-    }
-    .empty-state {
-      padding: 34px;
-      text-align: center;
-      color: var(--muted);
-    }
-    .sidebar-empty {
-      padding: 12px;
-      color: var(--muted);
-      border: 1px dashed var(--line);
-      border-radius: var(--r-btn);
-      background: rgba(255, 255, 255, 0.08);
-      font-size: 0.92rem;
-      line-height: 1.45;
-    }
-    .danger { color: var(--danger); }
-    .conf-chip {
-      display: inline-flex;
-      align-items: center;
-      gap: 8px;
-      margin: 2px 0 12px;
-      padding: 6px 12px;
-      border-radius: var(--r-pill);
-      font-size: 0.82rem;
-      font-weight: 700;
-      border: 1px solid var(--line);
-    }
-    .conf-high { color: #0b5c40; background: #e6f5ee; border-color: #a6d9c5; }
-    .conf-medium { color: var(--sky-700); background: var(--sky-100); border-color: var(--sky-300); }
-    .conf-low { color: #8f1c33; background: #fbeaed; border-color: #eeb8c3; }
-    .answer-warning {
-      margin: 10px 0 0;
-      padding: 10px 12px;
-      border-radius: var(--r-btn);
-      font-size: 0.86rem;
-      color: #8f1c33;
-      background: #fbeaed;
-      border: 1px solid #eeb8c3;
-    }
-    .sources { margin-top: 14px; border-top: 1px solid var(--line); padding-top: 10px; }
-    .sources > summary {
-      cursor: pointer;
-      font-weight: 700;
-      color: var(--plum-600);
-      font-size: 0.88rem;
-      list-style: none;
-    }
-    .source-item {
-      margin-top: 10px;
-      padding: 10px 12px;
-      border: 1px solid var(--line);
-      border-radius: var(--r-btn);
-      background: var(--plum-50);
-    }
-    .source-item strong { font-size: 0.86rem; }
-    .source-item .source-text {
-      margin-top: 6px;
-      font-size: 0.82rem;
-      color: var(--muted);
-      line-height: 1.5;
-      max-height: 150px;
-      overflow: auto;
-      white-space: pre-wrap;
-    }
-    mark {
-      background: var(--sky-200);
-      color: var(--plum-950);
-      border-radius: 3px;
-      padding: 0 2px;
-    }
-    .answer-metrics {
-      margin-top: 10px;
-      font-size: 0.76rem;
-      color: var(--muted);
-      display: flex;
-      flex-wrap: wrap;
-      gap: 6px 14px;
-    }
-    .followups-wrap { margin-top: 12px; }
-    .followups-wrap .section-label { margin: 0 0 8px; }
-    .file-row {
-      display: flex;
-      align-items: center;
-      justify-content: space-between;
-      gap: 8px;
-      padding: 8px 11px;
-      margin-top: 6px;
-      border: 1px solid var(--line);
-      border-radius: 8px;
-      background: var(--surface);
-    }
-    .file-name {
-      font-size: 0.82rem;
-      overflow: hidden;
-      text-overflow: ellipsis;
-      white-space: nowrap;
-      max-width: 200px;
-    }
-    .file-remove {
-      flex: 0 0 auto;
-      border: 0;
-      background: transparent;
-      color: var(--danger);
-      cursor: pointer;
-      font-size: 0.95rem;
-      line-height: 1;
-      padding: 2px 6px;
-      border-radius: 6px;
-    }
-    .file-remove:hover { background: #fbeaed; }
-    .file-clear-row {
-      display: flex;
-      align-items: center;
-      justify-content: space-between;
-      margin-top: 8px;
-      font-size: 0.78rem;
-      color: var(--muted);
-    }
-    .file-clear {
-      border: 1px solid #eeb8c3;
-      background: #fbeaed;
-      color: var(--danger);
-      cursor: pointer;
-      font-size: 0.76rem;
-      padding: 3px 9px;
-      border-radius: var(--r-pill);
-    }
-    .file-clear:hover { background: #f7d8de; }
-    @media (max-width: 1180px) {
-      .app-shell { grid-template-columns: 280px minmax(0, 1fr); }
-      .rightbar { display: none; }
-      .quick-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
-    }
-    @media (max-width: 760px) {
-      body { padding: 0; }
-      .app-shell {
-        grid-template-columns: 1fr;
-        border-radius: 0;
-        box-shadow: none;
-      }
-      .sidebar { display: none; }
-      .main { padding: 20px; }
-      .quick-grid, .inspector-grid { grid-template-columns: 1fr; }
-      .composer-actions { flex-direction: column; align-items: stretch; }
-      .send { width: 100%; }
-    }
-  </style>
-</head>
-<body>
-  <div class="app-shell">
-    <aside class="sidebar">
-      <div class="brand">
-        <div class="spark">✦</div>
-        <div>
-          <strong>AI Research Assistant</strong>
-          <span>Your AI-powered research companion</span>
-        </div>
-      </div>
-      <div class="profile-field">
-        <label for="userName">Your name</label>
-        <input id="userName" type="text" placeholder="Enter your name" autocomplete="name" />
-      </div>
-      <button class="new-chat" id="newChat">+ New Chat ✨</button>
-
-      <div class="nav">
-        <button class="nav-item active" id="navHome" data-nav="home">⌂ Home</button>
-        <button class="nav-item" id="navLibrary" data-nav="library">▣ Library</button>
-        <button class="nav-item" id="navRecent" data-nav="recent">◴ Recent Chats</button>
-      </div>
-
-      <div class="section-label">Recent Chats</div>
-      <div id="recentChats">
-        <div class="sidebar-empty">No recent chats yet.</div>
-      </div>
-
-      <div class="section-label">Your Library</div>
-      <div class="library" id="libraryList">
-        <div class="sidebar-empty">Upload PDFs to see them here.</div>
-      </div>
-    </aside>
-
-    <main class="main">
-      <div class="topbar">
-        <div>
-          <h1 id="greetingTitle">Hello Researcher!</h1>
-          <p class="subtitle">What would you like to research today?</p>
-        </div>
-        <button class="share" id="shareButton">↗ Share</button>
-      </div>
-
-      <div class="tab-bar">
-        <button class="tab active" data-tab="chat">Chat</button>
-        <button class="tab" data-tab="inspector">RAG Inspector</button>
-      </div>
-
-      <section id="chatTab" class="tab-view active">
-        <div class="panel chat-panel">
-          <div id="messages">
-            <div class="empty-state">Upload a PDF, ask a question, and I will answer with citations from your document.</div>
-          </div>
-
-          <div class="composer">
-            <textarea id="question" placeholder="Ask a follow-up question..."></textarea>
-            <label style="display:flex;align-items:center;gap:8px;font-size:0.82rem;color:var(--muted);margin:4px 0 10px;cursor:pointer;">
-              <input type="checkbox" id="webToggle" /> 🌐 Search the web for current info
-            </label>
-            <div class="composer-actions">
-              <div class="mode-toggle">
-                <button class="mode-button active" data-mode="Research Mode">🔬 Research<br><small>Professional</small></button>
-                <button class="mode-button" data-mode="Beginner Mode">🌱 Beginner<br><small>Plain & simple</small></button>
-                <button class="mode-button" data-mode="Interview Mode">🎯 Interview<br><small>Prep-ready</small></button>
-                <button class="mode-button" data-mode="Professor Mode">🎓 Professor<br><small>In-depth</small></button>
-                <button class="mode-button" data-mode="30-Second Summary">⚡ 30-Sec<br><small>TL;DR</small></button>
-                <button class="mode-button" data-mode="Bestie Mode">✨ Bestie<br><small>Sassy & fun</small></button>
-              </div>
-              <button class="send" id="askButton">➤</button>
-            </div>
-          </div>
-        </div>
-      </section>
-
-      <section id="inspectorTab" class="tab-view">
-        <div class="inspector-grid">
-          <div class="inspector-panel">
-            <h3>Question</h3>
-            <pre id="inspectQuestion">Ask a question to populate the inspector.</pre>
-          </div>
-          <div class="inspector-panel">
-            <h3>Embeddings</h3>
-            <pre id="inspectEmbeddings">Waiting for query vector terms.</pre>
-          </div>
-          <div class="inspector-panel full">
-            <h3>Retrieved Chunks + Similarity Scores</h3>
-            <div id="inspectChunks" class="muted">No retrieved chunks yet.</div>
-          </div>
-          <div class="inspector-panel full">
-            <h3>Prompt Sent To the Model</h3>
-            <pre id="inspectPrompt">The full context-injected prompt will appear here.</pre>
-          </div>
-          <div class="inspector-panel full">
-            <h3>Answer</h3>
-            <pre id="inspectAnswer">The generated answer will appear here.</pre>
-          </div>
-        </div>
-      </section>
-    </main>
-
-    <aside class="rightbar">
-      <div class="doc-card">
-        <label for="files"><strong id="docTitle">Add knowledge sources</strong></label>
-        <input class="file-input" id="files" type="file" accept=".pdf,.docx,.txt,.md,.markdown,.png,.jpg,.jpeg,.webp,.bmp,.tiff" multiple />
-        <div class="muted" style="margin-top:8px;font-size:0.78rem;">PDF · DOCX · TXT · Markdown · images (OCR)</div>
-        <input id="urlInput" class="profile-field" style="width:100%;margin-top:10px;padding:10px;border-radius:8px;border:1px solid var(--line);background:var(--input-bg);color:var(--text);" type="url" placeholder="…or paste a web page URL" />
-        <input id="youtubeInput" class="profile-field" style="width:100%;margin-top:8px;padding:10px;border-radius:8px;border:1px solid var(--line);background:var(--input-bg);color:var(--text);" type="url" placeholder="…or a YouTube link (transcript)" />
-        <div class="muted" id="fileStatus" style="margin-top:8px;">No source added yet.</div>
-        <div class="progress"></div>
-      </div>
-
-      <div class="side-card">
-        <h3>Document Insights</h3>
-        <div class="insight-grid">
-          <div class="metric"><strong id="pageCount">0</strong><span>Pages</span></div>
-          <div class="metric"><strong id="chunkCount">0</strong><span>Chunks</span></div>
-          <div class="metric"><strong id="topicCount">0</strong><span>Topics</span></div>
-        </div>
-        <div class="topic-list" id="topics">
-          <span class="topic">Governance</span>
-          <span class="topic">Ethics</span>
-          <span class="topic">Risk</span>
-        </div>
-      </div>
-
-      <div class="side-card">
-        <h3>Suggested Questions</h3>
-        <div class="question-list">
-          <button class="suggestion">What are the key ideas in this document?</button>
-          <button class="suggestion">Summarize this document in simple terms.</button>
-          <button class="suggestion">What risks or limitations are mentioned?</button>
-          <button class="suggestion">What should I remember for an interview?</button>
-        </div>
-      </div>
-
-      <div class="side-card">
-        <h3>Spill the tea on this doc ☕</h3>
-        <p class="muted">Switch to Bestie Mode for TL;DR, vibe check, and source-grounded chaos.</p>
-        <button class="primary-action" id="bestieShortcut">Give me the tea! ✨</button>
-      </div>
-    </aside>
-  </div>
-
-  <script>
-    const filesInput = document.getElementById("files");
-    const fileStatus = document.getElementById("fileStatus");
-    const userNameInput = document.getElementById("userName");
-    const greetingTitle = document.getElementById("greetingTitle");
-    const shareButton = document.getElementById("shareButton");
-    const libraryList = document.getElementById("libraryList");
-    const recentChats = document.getElementById("recentChats");
-    const docTitle = document.getElementById("docTitle");
-    const messages = document.getElementById("messages");
-    const questionInput = document.getElementById("question");
-    const askButton = document.getElementById("askButton");
-    const pageCount = document.getElementById("pageCount");
-    const chunkCount = document.getElementById("chunkCount");
-    const topicCount = document.getElementById("topicCount");
-    const topics = document.getElementById("topics");
-    const inspectQuestion = document.getElementById("inspectQuestion");
-    const inspectEmbeddings = document.getElementById("inspectEmbeddings");
-    const inspectChunks = document.getElementById("inspectChunks");
-    const inspectPrompt = document.getElementById("inspectPrompt");
-    const inspectAnswer = document.getElementById("inspectAnswer");
-    let currentMode = "Research Mode";
-    let latestAnswer = "";
-    let wordQueue = [];
-    let streamingTimer = null;
-    let activeAnswerNode = null;
-    let pendingFinalAnswer = null;
-    // Each chat: { id, title, turns: [{ role, content, mode }] }, newest first.
-    let chats = loadChats();
-    let currentChatId = null;
-    let selectedFiles = [];
-
-    const savedName = localStorage.getItem("ragUserName") || "";
-    userNameInput.value = savedName;
-    updateGreeting(savedName);
-    renderRecentChats();
-
-    userNameInput.addEventListener("input", () => {
-      const cleanName = userNameInput.value.trim();
-      localStorage.setItem("ragUserName", cleanName);
-      updateGreeting(cleanName);
-    });
-
-    function updateGreeting(name) {
-      const displayName = name || "Researcher";
-      greetingTitle.textContent = `Hello ${displayName}!`;
-    }
-
-    document.querySelectorAll(".tab").forEach(button => {
-      button.addEventListener("click", () => {
-        document.querySelectorAll(".tab").forEach(item => item.classList.remove("active"));
-        document.querySelectorAll(".tab-view").forEach(item => item.classList.remove("active"));
-        button.classList.add("active");
-        document.getElementById(button.dataset.tab + "Tab").classList.add("active");
-      });
-    });
-
-    document.querySelectorAll(".nav-item").forEach(button => {
-      button.addEventListener("click", () => {
-        document.querySelectorAll(".nav-item").forEach(item => item.classList.remove("active"));
-        button.classList.add("active");
-
-        if (button.dataset.nav === "home") {
-          activateTab("chat");
-          questionInput.focus();
-        }
-
-        if (button.dataset.nav === "library") {
-          filesInput.click();
-        }
-
-        if (button.dataset.nav === "recent") {
-          recentChats.scrollIntoView({ block: "nearest" });
-        }
-      });
-    });
-
-    shareButton.addEventListener("click", async () => {
-      const shareData = {
-        title: "AI RAG Research Assistant",
-        text: "Try my AI RAG Research Assistant.",
-        url: window.location.href
-      };
-
-      try {
-        if (navigator.share) {
-          await navigator.share(shareData);
-        } else {
-          await navigator.clipboard.writeText(window.location.href);
-          flashShareLabel("Copied link");
-        }
-      } catch (error) {
-        if (navigator.clipboard) {
-          await navigator.clipboard.writeText(window.location.href);
-          flashShareLabel("Copied link");
-        }
-      }
-    });
-
-    function activateTab(tabName) {
-      document.querySelectorAll(".tab").forEach(item => {
-        item.classList.toggle("active", item.dataset.tab === tabName);
-      });
-      document.querySelectorAll(".tab-view").forEach(item => item.classList.remove("active"));
-      document.getElementById(tabName + "Tab").classList.add("active");
-    }
-
-    function flashShareLabel(label) {
-      const original = shareButton.textContent;
-      shareButton.textContent = label;
-      setTimeout(() => {
-        shareButton.textContent = original;
-      }, 1600);
-    }
-
-    document.querySelectorAll(".mode-button").forEach(button => {
-      button.addEventListener("click", () => {
-        document.querySelectorAll(".mode-button").forEach(item => item.classList.remove("active"));
-        button.classList.add("active");
-        currentMode = button.dataset.mode;
-      });
-    });
-
-    document.querySelectorAll(".suggestion").forEach(button => {
-      button.addEventListener("click", () => {
-        questionInput.value = button.textContent.trim();
-      });
-    });
-
-    document.getElementById("bestieShortcut").addEventListener("click", () => {
-      currentMode = "Bestie Mode";
-      document.querySelectorAll(".mode-button").forEach(item => {
-        item.classList.toggle("active", item.dataset.mode === "Bestie Mode");
-      });
-      questionInput.value = "Spill the tea on this document. Give me the TL;DR, key points, and why it matters.";
-    });
-
-    document.getElementById("newChat").addEventListener("click", () => {
-      messages.innerHTML = '<div class="empty-state">Fresh chat ready. Upload a PDF and ask away.</div>';
-      currentChatId = null;
-      renderRecentChats();
-      questionInput.value = "";
-      latestAnswer = "";
-      updateInspector(null);
-    });
-
-    filesInput.addEventListener("change", () => {
-      Array.from(filesInput.files || []).forEach(file => {
-        const isDuplicate = selectedFiles.some(f => f.name === file.name && f.size === file.size);
-        if (!isDuplicate) selectedFiles.push(file);
-      });
-      // Clear so the same file can be re-added later and re-fire change.
-      filesInput.value = "";
-      renderSelectedFiles();
-    });
-
-    function renderSelectedFiles() {
-      if (!selectedFiles.length) {
-        fileStatus.innerHTML = "No source added yet.";
-        docTitle.textContent = "Add knowledge sources";
-        libraryList.innerHTML = '<div class="sidebar-empty">Upload files to see them here.</div>';
-        return;
-      }
-
-      docTitle.textContent = selectedFiles.length === 1 ? selectedFiles[0].name : `${selectedFiles.length} files`;
-
-      const clearAll = selectedFiles.length > 1
-        ? '<div class="file-clear-row"><span>' + selectedFiles.length + ' files</span>' +
-          '<button type="button" id="clearAllFiles" class="file-clear">✕ Clear all</button></div>'
-        : "";
-
-      fileStatus.innerHTML = clearAll + selectedFiles.map((file, index) =>
-        '<div class="file-row">' +
-        '<span class="file-name" title="' + escapeHtml(file.name) + '">📄 ' + escapeHtml(file.name) + '</span>' +
-        '<button type="button" class="file-remove" data-index="' + index + '" title="Remove">✕</button>' +
-        '</div>'
-      ).join("");
-
-      fileStatus.querySelectorAll(".file-remove").forEach(button => {
-        button.addEventListener("click", () => {
-          selectedFiles.splice(Number(button.dataset.index), 1);
-          renderSelectedFiles();
-        });
-      });
-
-      const clearAllButton = document.getElementById("clearAllFiles");
-      if (clearAllButton) {
-        clearAllButton.addEventListener("click", () => {
-          selectedFiles = [];
-          renderSelectedFiles();
-        });
-      }
-
-      libraryList.innerHTML = selectedFiles.map(file =>
-        '<button class="library-item" type="button">📄 <span>' + escapeHtml(file.name) + '</span></button>'
-      ).join("");
-    }
-
-    askButton.addEventListener("click", askQuestion);
-    questionInput.addEventListener("keydown", event => {
-      if (event.key === "Enter" && (event.ctrlKey || event.metaKey)) {
-        askQuestion();
-      }
-    });
-
-    async function askQuestion() {
-      const files = selectedFiles;
-      const urlValue = (document.getElementById("urlInput").value || "").trim();
-      const youtubeValue = (document.getElementById("youtubeInput").value || "").trim();
-      const question = questionInput.value.trim();
-
-      if (!files.length && !urlValue && !youtubeValue) {
-        renderError("Add a source first: upload a file, paste a URL, or add a YouTube link.");
-        return;
-      }
-
-      if (!question) {
-        renderError("Please enter a question.");
-        return;
-      }
-
-      if (messages.querySelector(".empty-state")) {
-        messages.innerHTML = "";
-      }
-
-      addMessage("user", question);
-      questionInput.value = "";
-      if (!currentChatId) {
-        currentChatId = Date.now().toString(36);
-        chats.unshift({ id: currentChatId, title: question, turns: [] });
-      }
-      const chatId = currentChatId;
-      const mode = currentMode;
-      const history = chatTurns(chatId).map(({ role, content }) => ({ role, content }));
-      appendTurn(chatId, { role: "user", content: question });
-      const answerNode = addMessage("assistant", "", mode);
-      latestAnswer = "";
-      wordQueue = [];
-      pendingFinalAnswer = null;
-      activeAnswerNode = answerNode;
-      stopWordStreamer();
-      askButton.disabled = true;
-      inspectAnswer.textContent = "Streaming answer...";
-
-      const formData = new FormData();
-      files.forEach(file => formData.append("files", file));
-      if (urlValue) formData.append("url", urlValue);
-      if (youtubeValue) formData.append("youtube_url", youtubeValue);
-      formData.append("question", question);
-      formData.append("answer_mode", currentMode);
-      formData.append("use_web", document.getElementById("webToggle").checked ? "true" : "false");
-      formData.append("history", JSON.stringify(history));
-
-      try {
-        const response = await fetch("/api/research/stream", {
-          method: "POST",
-          body: formData
-        });
-
-        if (!response.ok || !response.body) {
-          const data = await response.json().catch(() => ({}));
-          throw new Error(data.detail || "Request failed.");
-        }
-
-        const reader = response.body.getReader();
-        const decoder = new TextDecoder();
-        let buffer = "";
-
-        while (true) {
-          const { value, done } = await reader.read();
-
-          if (done) {
-            break;
-          }
-
-          buffer += decoder.decode(value, { stream: true });
-          const events = buffer.split("\\n\\n");
-          buffer = events.pop() || "";
-
-          for (const eventText of events) {
-            handleStreamEvent(eventText, answerNode, chatId, mode);
-          }
-        }
-
-        if (buffer.trim()) {
-          handleStreamEvent(buffer, answerNode, chatId, mode);
-        }
-      } catch (error) {
-        answerNode.textContent = error.message;
-        answerNode.classList.add("danger");
-      } finally {
-        askButton.disabled = false;
-      }
-    }
-
-    function handleStreamEvent(eventText, answerNode, chatId, mode) {
-      const eventLine = eventText.split("\\n").find(line => line.startsWith("event:"));
-      const dataLine = eventText.split("\\n").find(line => line.startsWith("data:"));
-
-      if (!eventLine || !dataLine) {
-        return;
-      }
-
-      const eventName = eventLine.replace("event:", "").trim();
-      const payload = JSON.parse(dataLine.replace("data:", "").trim());
-
-      if (eventName === "trace") {
-        updateInspector(payload);
-        renderAnswerMeta(answerNode, payload);
-      }
-
-      if (eventName === "chunk") {
-        enqueueWords(payload.text, answerNode);
-      }
-
-      if (eventName === "done") {
-        pendingFinalAnswer = payload.answer || latestAnswer;
-        if (!wordQueue.length) {
-          latestAnswer = pendingFinalAnswer;
-          answerNode.textContent = latestAnswer;
-          inspectAnswer.textContent = latestAnswer;
-        }
-        renderMetrics(answerNode, payload.metrics);
-        renderFollowUps(payload.follow_up_questions);
-        showInspectorMetrics(payload.metrics);
-        appendTurn(chatId, { role: "assistant", content: payload.answer || latestAnswer, mode });
-      }
-
-      if (eventName === "error") {
-        throw new Error(payload.message || "Streaming failed.");
-      }
-    }
-
-    function enqueueWords(text, answerNode) {
-      const pieces = String(text).match(/\\S+\\s*/g) || [String(text)];
-      wordQueue.push(...pieces);
-      activeAnswerNode = answerNode;
-
-      if (!streamingTimer) {
-        streamingTimer = setInterval(flushNextWord, 26);
-      }
-    }
-
-    function flushNextWord() {
-      if (!wordQueue.length) {
-        stopWordStreamer();
-
-        if (pendingFinalAnswer) {
-          latestAnswer = pendingFinalAnswer;
-          if (activeAnswerNode) {
-            activeAnswerNode.textContent = latestAnswer;
-          }
-          inspectAnswer.textContent = latestAnswer;
-        }
-
-        return;
-      }
-
-      const nextWord = wordQueue.shift();
-      const shouldStickToBottom = isMessagesNearBottom();
-      latestAnswer += nextWord;
-
-      if (activeAnswerNode) {
-        activeAnswerNode.textContent = latestAnswer;
-      }
-
-      inspectAnswer.textContent = latestAnswer;
-
-      if (shouldStickToBottom) {
-        scrollMessagesToBottom();
-      }
-    }
-
-    function stopWordStreamer() {
-      if (streamingTimer) {
-        clearInterval(streamingTimer);
-        streamingTimer = null;
-      }
-    }
-
-    function addMessage(role, content, mode) {
-      const row = document.createElement("div");
-      row.className = `message-row ${role}`;
-
-      if (role === "assistant") {
-        const face = document.createElement("div");
-        face.className = "bot-face";
-        face.textContent = "🤖";
-        row.appendChild(face);
-      }
-
-      const bubble = document.createElement("div");
-      bubble.className = `bubble ${role}`;
-
-      if (role === "assistant") {
-        const pill = document.createElement("div");
-        pill.className = "mode-pill";
-        pill.textContent = modeLabel(mode);
-        bubble.appendChild(pill);
-        const answer = document.createElement("div");
-        answer.textContent = content || "Thinking...";
-        bubble.appendChild(answer);
-        row.appendChild(bubble);
-        messages.appendChild(row);
-        scrollMessagesToBottom();
-        return answer;
-      }
-
-      bubble.textContent = content;
-      row.appendChild(bubble);
-      messages.appendChild(row);
-      scrollMessagesToBottom();
-      return bubble;
-    }
-
-    function isMessagesNearBottom() {
-      return messages.scrollHeight - messages.scrollTop - messages.clientHeight < 80;
-    }
-
-    function scrollMessagesToBottom() {
-      messages.scrollTop = messages.scrollHeight;
-    }
-
-    function renderError(message) {
-      if (messages.querySelector(".empty-state")) {
-        messages.innerHTML = "";
-      }
-      const node = addMessage("assistant", message, currentMode);
-      node.classList.add("danger");
-    }
-
-    function loadChats() {
-      try {
-        return JSON.parse(localStorage.getItem("ragChats") || "[]");
-      } catch (error) {
-        return [];
-      }
-    }
-
-    function saveChats() {
-      // No cap on saved chats. Only if the browser's storage quota is full do
-      // the oldest chats stop being saved; they stay usable this session.
-      for (let keep = chats.length; keep > 0; keep--) {
-        try {
-          localStorage.setItem("ragChats", JSON.stringify(chats.slice(0, keep)));
-          return;
-        } catch (error) {
-          // Quota exceeded (or storage blocked): retry with one fewer chat.
-        }
-      }
-    }
-
-    function chatTurns(chatId) {
-      const chat = chats.find(item => item.id === chatId);
-      return chat ? chat.turns : [];
-    }
-
-    function appendTurn(chatId, turn) {
-      const chat = chats.find(item => item.id === chatId);
-      if (!chat) return;
-      chat.turns.push(turn);
-      // Most recently used chat moves to the top.
-      chats = [chat, ...chats.filter(item => item.id !== chatId)];
-      saveChats();
-      renderRecentChats();
-    }
-
-    function openChat(chatId) {
-      const chat = chats.find(item => item.id === chatId);
-      if (!chat) return;
-      stopWordStreamer();
-      wordQueue = [];
-      pendingFinalAnswer = null;
-      activeAnswerNode = null;
-      currentChatId = chatId;
-      messages.innerHTML = "";
-      latestAnswer = "";
-      chat.turns.forEach(turn => {
-        addMessage(turn.role, turn.content, turn.mode);
-        if (turn.role === "assistant") latestAnswer = turn.content;
-      });
-      inspectAnswer.textContent = latestAnswer;
-      activateTab("chat");
-      renderRecentChats();
-      questionInput.focus();
-    }
-
-    function renderRecentChats() {
-      if (!chats.length) {
-        recentChats.innerHTML = '<div class="sidebar-empty">No recent chats yet.</div>';
-        return;
-      }
-
-      recentChats.innerHTML = chats.map(chat => `
-        <button class="recent-item ${chat.id === currentChatId ? "active" : ""}" type="button" data-chat-id="${escapeHtml(chat.id)}">
-          💬 <span>${escapeHtml(shortenText(chat.title, 42))}</span>
-        </button>
-      `).join("");
-
-      recentChats.querySelectorAll(".recent-item").forEach(button => {
-        button.addEventListener("click", () => openChat(button.dataset.chatId));
-      });
-    }
-
-    function shortenText(text, maxLength) {
-      return text.length > maxLength ? text.slice(0, maxLength - 1) + "..." : text;
-    }
-
-    function updateInspector(trace) {
-      if (!trace) {
-        inspectQuestion.textContent = "Ask a question to populate the inspector.";
-        inspectEmbeddings.textContent = "Waiting for query vector terms.";
-        inspectChunks.textContent = "No retrieved chunks yet.";
-        inspectPrompt.textContent = "The full context-injected prompt will appear here.";
-        inspectAnswer.textContent = "The generated answer will appear here.";
-        pageCount.textContent = "0";
-        chunkCount.textContent = "0";
-        topicCount.textContent = "0";
-        return;
-      }
-
-      inspectQuestion.textContent = trace.question;
-      inspectEmbeddings.textContent = JSON.stringify(
-        { ...trace.embedding_summary, confidence: trace.confidence }, null, 2
-      );
-      inspectPrompt.textContent = trace.prompt;
-      pageCount.textContent = trace.pages_processed;
-      chunkCount.textContent = trace.chunks_processed;
-
-      const allTerms = new Set();
-      trace.retrieved_chunks.forEach(chunk => {
-        (chunk.top_terms || []).slice(0, 3).forEach(term => allTerms.add(term));
-      });
-      topicCount.textContent = allTerms.size;
-      topics.innerHTML = Array.from(allTerms).slice(0, 8).map(term => `<span class="topic">${escapeHtml(term)}</span>`).join("");
-
-      inspectChunks.innerHTML = trace.retrieved_chunks.map((chunk, index) => {
-        const percent = Math.max(4, Math.round(Number(chunk.score || 0) * 100));
-        return `
-          <div class="score-row">
-            <strong>Chunk ${index + 1}: ${escapeHtml(chunk.source)} · Page ${chunk.page}</strong>
-            <div class="muted">Score ${Number(chunk.score).toFixed(3)} · Matched: ${(chunk.matched_terms || []).map(escapeHtml).join(", ") || "No exact keyword overlap"}</div>
-            <div class="score-track"><div class="score-fill" style="width:${percent}%"></div></div>
-            <pre>${highlightTerms(chunk.preview, chunk.matched_terms)}</pre>
-          </div>
-        `;
-      }).join("");
-    }
-
-    function modeLabel(mode) {
-      const map = {
-        "Research Mode": "🔬 Research Mode",
-        "Beginner Mode": "🌱 Beginner Mode",
-        "Interview Mode": "🎯 Interview Mode",
-        "Professor Mode": "🎓 Professor Mode",
-        "30-Second Summary": "⚡ 30-Second Summary",
-        "Bestie Mode": "✨ Bestie Mode"
-      };
-      return map[mode] || "🔬 Research Mode";
-    }
-
-    function highlightTerms(text, terms) {
-      let safe = escapeHtml(text);
-      const seen = new Set();
-      (terms || []).forEach(term => {
-        const t = String(term).trim();
-        if (t.length < 2) return;
-        const key = t.toLowerCase();
-        if (seen.has(key)) return;
-        seen.add(key);
-        // matched_terms/top_terms are alphanumeric tokens, safe to use directly
-        safe = safe.replace(new RegExp("(" + t + ")", "gi"), "<mark>$1</mark>");
-      });
-      return safe;
-    }
-
-    function renderAnswerMeta(answerNode, trace) {
-      const bubble = answerNode.parentElement;
-      if (!bubble || bubble.dataset.metaDone) return;
-      bubble.dataset.metaDone = "1";
-
-      const conf = trace.confidence || {};
-      const pct = Math.round((Number(conf.score) || 0) * 100);
-      const label = conf.label || "low";
-
-      const chip = document.createElement("div");
-      chip.className = "conf-chip conf-" + label;
-      chip.textContent = "🎯 Confidence: " + pct + "% · " + label;
-      if (trace.route) {
-        chip.textContent += "  ·  🧭 " + trace.route;
-      }
-      bubble.insertBefore(chip, answerNode);
-
-      if (conf.warning) {
-        const warn = document.createElement("div");
-        warn.className = "answer-warning";
-        warn.textContent = "⚠️ " + conf.warning;
-        bubble.appendChild(warn);
-      }
-
-      const chunks = trace.retrieved_chunks || [];
-      const web = trace.web_results || [];
-      if (chunks.length || web.length) {
-        const details = document.createElement("details");
-        details.className = "sources";
-        const docHtml = chunks.map((c, i) =>
-          '<div class="source-item"><strong>[' + (i + 1) + '] ' + escapeHtml(c.source) +
-          ' · Page ' + c.page + '</strong> <span class="muted">· score ' +
-          Number(c.score).toFixed(3) + (c.section ? ' · ' + escapeHtml(c.section) : '') +
-          '</span><div class="source-text">' +
-          highlightTerms(c.preview || "", c.matched_terms) + '</div></div>'
-        ).join("");
-        const webHtml = web.map((w, i) =>
-          '<div class="source-item"><strong>🌐 [Web Source ' + (i + 1) + '] ' + escapeHtml(w.title || "") +
-          '</strong>' + (w.url ? ' <a href="' + escapeHtml(w.url) + '" target="_blank" rel="noopener" class="muted">link</a>' : '') +
-          '<div class="source-text">' + escapeHtml(w.snippet || "") + '</div></div>'
-        ).join("");
-        details.innerHTML =
-          "<summary>📚 Sources (" + (chunks.length + web.length) + ") — exact text used for this answer</summary>" +
-          docHtml + webHtml;
-        bubble.appendChild(details);
-      }
-    }
-
-    function renderMetrics(answerNode, metrics) {
-      if (!metrics) return;
-      const bubble = answerNode.parentElement;
-      if (!bubble) return;
-      const line = document.createElement("div");
-      line.className = "answer-metrics";
-      const tokens = (metrics.prompt_tokens || 0) + (metrics.completion_tokens || 0);
-      line.innerHTML =
-        "<span>⏱ " + metrics.latency_ms + " ms</span>" +
-        "<span>🔢 " + tokens + " tokens</span>" +
-        "<span>💸 $" + (Number(metrics.request_cost_usd) || 0).toFixed(5) + "</span>" +
-        "<span>🔎 " + escapeHtml(metrics.retrieval_mode || "") + "</span>";
-      bubble.appendChild(line);
-    }
-
-    function renderFollowUps(list) {
-      if (!list || !list.length) return;
-      const wrap = document.querySelector(".question-list");
-      if (!wrap) return;
-      wrap.innerHTML = list.map(q => '<button class="suggestion">' + escapeHtml(q) + "</button>").join("");
-      wrap.querySelectorAll(".suggestion").forEach(btn => {
-        btn.addEventListener("click", () => { questionInput.value = btn.textContent.trim(); });
-      });
-    }
-
-    function showInspectorMetrics(metrics) {
-      if (!metrics || !inspectChunks) return;
-      const banner =
-        '<div class="score-row"><strong>📊 Request metrics</strong><div class="muted">Latency ' +
-        metrics.latency_ms + " ms · Prompt " + metrics.prompt_tokens + " tok · Completion " +
-        metrics.completion_tokens + " tok · Embed " + metrics.embedding_tokens + " tok · Cost $" +
-        (Number(metrics.request_cost_usd) || 0).toFixed(5) + " · " + escapeHtml(metrics.retrieval_mode || "") +
-        " · Session fallback " + Math.round((Number(metrics.session_fallback_rate) || 0) * 100) +
-        "%</div></div>";
-      inspectChunks.innerHTML = banner + inspectChunks.innerHTML;
-    }
-
-    function escapeHtml(value) {
-      return String(value)
-        .replaceAll("&", "&amp;")
-        .replaceAll("<", "&lt;")
-        .replaceAll(">", "&gt;")
-        .replaceAll('"', "&quot;")
-        .replaceAll("'", "&#039;");
-    }
-  </script>
-</body>
-</html>
-"""
-    )
+    return HTMLResponse(INDEX_HTML)
 
 
 @app.get("/api/health")
@@ -2357,50 +934,78 @@ def chat(request: ChatRequest):
     )
 
 
+def _as_list(value: Optional[Any]) -> List[str]:
+    """Form fields may arrive as one string or a repeated list; normalise both."""
+    if value is None:
+        return []
+    values = value if isinstance(value, list) else [value]
+    return [v.strip() for v in values if isinstance(v, str) and v.strip()]
+
+
 async def gather_sources(
     files: Optional[List[UploadFile]] = None,
-    url: Optional[str] = None,
-    youtube_url: Optional[str] = None,
+    url: Optional[Any] = None,
+    youtube_url: Optional[Any] = None,
 ):
     """Collect knowledge sources from uploaded files (PDF/DOCX/TXT/MD/images),
-    a web page URL, and/or a YouTube link (#8). Returns a list of source dicts
-    that build_document_index() understands."""
+    web page URLs, and/or YouTube links (#8). Returns (sources, warnings):
+    source dicts that build_document_index() understands, plus one warning per
+    source that had to be skipped. Only fails if no source is usable at all."""
+    sources, warnings = await collect_sources(files, url, youtube_url)
+
+    if not sources:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                _no_readable_sources_message(warnings)
+                if warnings
+                else "Please upload a document or provide a URL / YouTube link."
+            ),
+        )
+
+    return sources, warnings
+
+
+async def collect_sources(
+    files: Optional[List[UploadFile]] = None,
+    url: Optional[Any] = None,
+    youtube_url: Optional[Any] = None,
+):
+    """Like gather_sources, but never raises: an empty source list is allowed."""
     sources: List[Dict[str, Any]] = []
+    warnings: List[Dict[str, str]] = []
 
     for upload in files or []:
         if not upload.filename:
             continue
         if not upload.filename.lower().endswith(SUPPORTED_UPLOAD_EXTENSIONS):
-            raise HTTPException(
-                status_code=400,
-                detail=f"{upload.filename}: unsupported type. Supported: {', '.join(SUPPORTED_UPLOAD_EXTENSIONS)}",
-            )
+            warnings.append({
+                "source": upload.filename,
+                "message": f"unsupported file type. Supported: {', '.join(SUPPORTED_UPLOAD_EXTENSIONS)}",
+            })
+            continue
         data = await upload.read()
         if len(data) > MAX_UPLOAD_BYTES:
-            raise HTTPException(
-                status_code=413,
-                detail=f"{upload.filename} exceeds the {MAX_UPLOAD_MB:.0f} MB upload limit.",
-            )
+            warnings.append({
+                "source": upload.filename,
+                "message": f"larger than the {MAX_UPLOAD_MB:.0f} MB upload limit.",
+            })
+            continue
         sources.append({"filename": upload.filename, "bytes": data})
 
-    if url and url.strip():
+    for page_url in _as_list(url):
         try:
-            sources.append({"key": url.strip(), "pages": extract_url(url.strip())})
+            sources.append({"key": page_url, "pages": extract_url(page_url)})
         except Exception as error:
-            raise HTTPException(status_code=400, detail=f"Could not read URL: {error}") from error
+            warnings.append({"source": page_url, "message": f"could not read this web page ({error})."})
 
-    if youtube_url and youtube_url.strip():
+    for video_url in _as_list(youtube_url):
         try:
-            sources.append({"key": youtube_url.strip(), "pages": extract_youtube(youtube_url.strip())})
+            sources.append({"key": video_url, "pages": extract_youtube(video_url)})
         except Exception as error:
-            raise HTTPException(status_code=400, detail=f"Could not read YouTube transcript: {error}") from error
+            warnings.append({"source": video_url, "message": f"could not read the transcript ({error})."})
 
-    if not sources:
-        raise HTTPException(
-            status_code=400, detail="Please upload a document or provide a URL / YouTube link."
-        )
-
-    return sources
+    return sources, warnings
 
 
 @app.post("/api/research")
@@ -2408,8 +1013,8 @@ async def research(
     question: str = Form(...),
     answer_mode: str = Form("Research Mode"),
     files: Optional[List[UploadFile]] = File(None),
-    url: Optional[str] = Form(None),
-    youtube_url: Optional[str] = Form(None),
+    url: Optional[List[str]] = Form(None),
+    youtube_url: Optional[List[str]] = Form(None),
     use_web: bool = Form(False),
     history: Optional[str] = Form(None),
 ):
@@ -2420,11 +1025,12 @@ async def research(
 
     started = time.perf_counter()
     embedding_before = METRICS["embedding_tokens"]
-    sources = await gather_sources(files, url, youtube_url)
+    sources, source_warnings = await gather_sources(files, url, youtube_url)
     history_summary, had_history = build_history_context(history)
     trace = prepare_rag_trace(
         clean_question, answer_mode, sources,
         use_web=use_web, history_summary=history_summary, has_history=had_history,
+        source_warnings=source_warnings,
     )
     embedding_used = METRICS["embedding_tokens"] - embedding_before
 
@@ -2462,8 +1068,8 @@ async def research_stream(
     question: str = Form(...),
     answer_mode: str = Form("Research Mode"),
     files: Optional[List[UploadFile]] = File(None),
-    url: Optional[str] = Form(None),
-    youtube_url: Optional[str] = Form(None),
+    url: Optional[List[str]] = Form(None),
+    youtube_url: Optional[List[str]] = Form(None),
     use_web: bool = Form(False),
     history: Optional[str] = Form(None),
 ):
@@ -2474,11 +1080,12 @@ async def research_stream(
 
     started = time.perf_counter()
     embedding_before = METRICS["embedding_tokens"]
-    sources = await gather_sources(files, url, youtube_url)
+    sources, source_warnings = await gather_sources(files, url, youtube_url)
     history_summary, had_history = build_history_context(history)
     trace = prepare_rag_trace(
         clean_question, answer_mode, sources,
         use_web=use_web, history_summary=history_summary, has_history=had_history,
+        source_warnings=source_warnings,
     )
     embedding_used = METRICS["embedding_tokens"] - embedding_before
 
@@ -2522,6 +1129,97 @@ async def research_stream(
             yield serialize_event("error", {"message": f"Model API error: {str(error)}"})
 
     return StreamingResponse(event_stream(), media_type="text/event-stream")
+
+
+def document_insights(index: Dict[str, Any], refresh_questions: bool = False) -> Dict[str, Any]:
+    """Key topics + suggested questions for an indexed document set, cached on the
+    index. One small LLM call (~$0.0003); keyphrase extraction is the free fallback.
+    ``refresh_questions`` keeps the topics and asks for five new questions."""
+    cached = index.get("insights")
+    if cached and not refresh_questions:
+        return cached
+
+    texts = [chunk["text"] for chunk in index["chunks"]]
+    keyphrases = (cached or {}).get("keyphrases") or extract_keyphrases(texts)
+    prompt = build_insights_prompt(
+        keyphrases,
+        sample_excerpts(texts),
+        avoid_questions=(cached or {}).get("questions") if refresh_questions else None,
+    )
+    try:
+        llm_result = parse_insights(
+            generate_answer(prompt, temperature=0.8 if refresh_questions else 0.3, max_tokens=600)
+        )
+    except Exception:
+        llm_result = None
+
+    insights = build_insights(keyphrases, llm_result)
+    if cached and refresh_questions:
+        insights["topics"], insights["source"] = cached["topics"], cached["source"]
+    index["insights"] = insights
+    return insights
+
+
+@app.post("/api/sources/analyze")
+async def analyze_sources(
+    files: Optional[List[UploadFile]] = File(None),
+    url: Optional[List[str]] = Form(None),
+    youtube_url: Optional[List[str]] = Form(None),
+    refresh_questions: bool = Form(False),
+):
+    """Index the given sources and report on them for the Knowledge panel:
+    per-source status (ready/failed) with page and chunk counts, document totals,
+    key topics and suggested questions. Never fails because of one bad source;
+    an all-failed request still returns 200 with every source marked failed."""
+    sources, warnings = await collect_sources(files, url, youtube_url)
+    failed = [
+        {"input": w["source"], "name": w["source"], "status": "failed", "message": w["message"],
+         "pages": 0, "chunks": 0}
+        for w in warnings
+    ]
+    empty = {"pages": 0, "chunks": 0, "topics": [], "questions": [], "insights_source": None,
+             "semantic": False}
+
+    if not sources:
+        return {"sources": failed, **empty}
+
+    try:
+        index = build_document_index(sources)
+    except NoReadableSources as error:
+        failed += [
+            {"input": w["source"], "name": w["source"], "status": "failed", "message": w["message"],
+             "pages": 0, "chunks": 0}
+            for w in error.warnings
+        ]
+        return {"sources": failed, **empty}
+
+    extract_failures = {w["source"]: w["message"] for w in index["warnings"]}
+    chunk_counts = Counter(chunk["source"] for chunk in index["chunks"])
+    report = []
+    for source in sources:
+        if "bytes" in source:
+            given, name = source["filename"], source["filename"]
+        else:
+            given = source["key"]
+            name = source["pages"][0]["source"] if source.get("pages") else source["key"]
+        if given in extract_failures:
+            report.append({"input": given, "name": name, "status": "failed",
+                           "message": extract_failures[given], "pages": 0, "chunks": 0})
+        else:
+            report.append({"input": given, "name": name, "status": "ready", "message": "",
+                           "pages": index.get("source_pages", {}).get(name, 0),
+                           "chunks": chunk_counts.get(name, 0)})
+
+    insights = document_insights(index, refresh_questions=refresh_questions)
+    return {
+        "sources": report + failed,
+        "pages": index["pages"],
+        "chunks": len(index["chunks"]),
+        "topics": insights["topics"],
+        "questions": insights["questions"],
+        "insights_source": insights["source"],
+        "semantic": index["semantic"],
+    }
 
 
 @app.get("/api/metrics")
