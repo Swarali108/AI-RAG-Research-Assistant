@@ -2,11 +2,13 @@
 
 import asyncio
 import io
+import json
 from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 from fastapi import HTTPException, UploadFile
+from fastapi.testclient import TestClient
 
 import src.app as app_module
 from src.app import (
@@ -180,3 +182,49 @@ def test_gather_sources_skips_unsupported_and_oversized_files(monkeypatch):
 
     assert [s["filename"] for s in sources] == ["ok.txt"]
     assert [w["source"] for w in warnings] == ["slides.pptx", "big.txt"]
+
+
+def _sse_events(body: str):
+    """Parse a Server-Sent Events body into [(event_name, payload), ...]."""
+    events = []
+    for block in body.split("\n\n"):
+        lines = block.split("\n")
+        name = next((l[len("event: "):] for l in lines if l.startswith("event: ")), None)
+        data = next((l[len("data: "):] for l in lines if l.startswith("data: ")), None)
+        if name and data:
+            events.append((name, json.loads(data)))
+    return events
+
+
+def test_stream_answers_from_good_files_when_ocr_is_unavailable(monkeypatch):
+    """The Vercel case: a valid image arrives but the Tesseract binary is missing.
+    The request must still succeed, name the skipped image, and answer from the rest."""
+    import pytesseract
+    from PIL import Image
+
+    def tesseract_missing(*args, **kwargs):
+        raise pytesseract.TesseractNotFoundError()
+
+    monkeypatch.setattr(pytesseract, "image_to_string", tesseract_missing)
+    monkeypatch.setattr(app_module, "embed_texts", lambda texts, task_type=None: None)
+    monkeypatch.setattr(app_module, "stream_answer", lambda prompt, **kwargs: iter(["RAG ", "grounds answers."]))
+
+    png = io.BytesIO()
+    Image.new("RGB", (40, 20), "white").save(png, format="PNG")
+    files = [
+        ("files", ("notes.txt", io.BytesIO(b"Retrieval augmented generation grounds answers in documents. " * 20), "text/plain")),
+        ("files", ("whiteboard.png", io.BytesIO(png.getvalue()), "image/png")),
+    ]
+
+    response = TestClient(app_module.app).post(
+        "/api/research/stream", files=files, data={"question": "What is RAG?"}
+    )
+
+    assert response.status_code == 200
+    events = dict(_sse_events(response.text))
+    assert "error" not in events
+    warnings = events["trace"]["warnings"]
+    assert [w["source"] for w in warnings] == ["whiteboard.png"]
+    assert "OCR" in warnings[0]["message"]
+    assert {c["source"] for c in events["trace"]["retrieved_chunks"]} == {"notes.txt"}
+    assert events["done"]["answer"] == "RAG grounds answers."
